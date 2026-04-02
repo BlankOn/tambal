@@ -326,19 +326,23 @@ def evaluate(advisories, package_index):
         if repo_ver is None:
             continue  # package not present in this repo
 
-        vulnerable_in = []
+        fixed_versions = []
+        is_vulnerable = False
         for fv in adv.get("fixed_versions", []):
             fixed_ver = fv.get("version", "").strip()
             if not fixed_ver:
                 continue
-            if version_lt(repo_ver, fixed_ver):
-                vulnerable_in.append({
-                    "release": fv["release"],
-                    "fixed_version": fixed_ver,
-                    "status": fv.get("status", ""),
-                })
+            below = version_lt(repo_ver, fixed_ver)
+            if below:
+                is_vulnerable = True
+            fixed_versions.append({
+                "release": fv["release"],
+                "fixed_version": fixed_ver,
+                "status": fv.get("status", ""),
+                "below": below,
+            })
 
-        if vulnerable_in:
+        if is_vulnerable:
             findings.append({
                 "advisory_id": adv["id"],
                 "date": adv["date"],
@@ -346,7 +350,8 @@ def evaluate(advisories, package_index):
                 "repo_version": repo_ver,
                 "description": adv["description"],
                 "announce_url": adv["announce_url"],
-                "vulnerable_against": vulnerable_in,
+                "tracker_url": adv["tracker_url"],
+                "vulnerable_against": fixed_versions,
             })
 
     return findings
@@ -364,20 +369,43 @@ def write_html_report(findings, html_dir, repo_url):
 
     rows = []
     for f in findings:
+        # Find the latest fixed version across all releases to compare repo version against
+        all_fixed = [v["fixed_version"] for v in f["vulnerable_against"] if v["fixed_version"]]
+        latest_fixed = None
+        for fv in all_fixed:
+            if latest_fixed is None or version_lt(latest_fixed, fv):
+                latest_fixed = fv
+        repo_below_latest = latest_fixed is not None and version_lt(f["repo_version"], latest_fixed)
+        ver_class = "ver-below" if repo_below_latest else "ver-above"
+
+        import functools
+        def _cmp_ver(a, b):
+            if version_lt(a["fixed_version"], b["fixed_version"]):
+                return 1   # a < b → a comes after b (descending)
+            if version_lt(b["fixed_version"], a["fixed_version"]):
+                return -1  # b < a → a comes before b
+            return 0
+        sorted_versions = sorted(
+            f["vulnerable_against"],
+            key=functools.cmp_to_key(_cmp_ver),
+        )
         fixes = "".join(
-            f"<tr><td>{e(v['release'])}</td><td>{e(v['fixed_version'])}</td><td>{e(v['status'])}</td></tr>"
-            for v in f["vulnerable_against"]
+            f'<tr>'
+            f'<td>{e(v["release"])}</td>'
+            f'<td>{e(v["fixed_version"])}</td>'
+            f'<td>{e(v["status"])}</td>'
+            f'</tr>'
+            for v in sorted_versions
         )
         rows.append(f"""
         <tr>
           <td>{e(f['date'])}</td>
-          <td><a href="{e(f['announce_url'])}" target="_blank">{e(f['advisory_id'])}</a></td>
           <td>{e(f['package'])}</td>
-          <td>{e(f['description'])}</td>
-          <td>{e(f['repo_version'])}</td>
+          <td><a href="{e(f['announce_url'])}" target="_blank">{e(f['advisory_id'])}</a> | <a href="{e(f['tracker_url'])}" target="_blank">Tracker</a></td>
+          <td class="{ver_class}">{e(f['repo_version'])}</td>
           <td>
             <table class="inner">
-              <tr><th>Release</th><th>Fixed version</th><th>Status</th></tr>
+              <tr><th>Release</th><th>Version</th><th>Status</th></tr>
               {fixes}
             </table>
           </td>
@@ -406,6 +434,8 @@ def write_html_report(findings, html_dir, repo_url):
     table.inner {{ font-size: 0.82rem; border: none; width: auto; }}
     table.inner th, table.inner td {{ border: 1px solid #e0e0e0; padding: 0.25rem 0.5rem; }}
     table.inner th {{ background: #f9f9f9; }}
+    .ver-above {{ color: #27ae60; font-weight: bold; }}
+    .ver-below {{ color: #c0392b; font-weight: bold; }}
     a {{ color: #1a73e8; }}
   </style>
 </head>
@@ -421,9 +451,8 @@ def write_html_report(findings, html_dir, repo_url):
     <thead>
       <tr>
         <th>Date</th>
-        <th>Advisory</th>
         <th>Package</th>
-        <th>Description</th>
+        <th>Advisory</th>
         <th>Repo version</th>
         <th>Fixed Versions</th>
       </tr>
