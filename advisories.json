@@ -3131,18 +3131,7 @@
     "description": "DSA-6021-1 chromium security update",
     "tracker_url": "https://security-tracker.debian.org/tracker/DSA-6021-1",
     "announce_url": "https://lists.debian.org/debian-security-announce/2025/msg00187.html",
-    "fixed_versions": [
-      {
-        "release": "bookworm",
-        "version": "141.0.7390.65-1~deb12u1",
-        "status": "fixed"
-      },
-      {
-        "release": "trixie",
-        "version": "141.0.7390.65-1~deb13u1",
-        "status": "fixed"
-      }
-    ]
+    "fixed_versions": []
   },
   {
     "date": "2025-10-08",
@@ -5345,6 +5334,651 @@
       {
         "release": "bookworm",
         "version": "128.9.0esr-1~deb12u1",
+        "status": "fixed"
+      }
+    ]
+  },
+  {
+    "date": "2025-03-26",
+    "id": "DSA-5888-1",
+    "package": "ghostscript",
+    "description": "DSA-5888-1 ghostscript security update",
+    "tracker_url": "https://security-tracker.debian.org/tracker/DSA-5888-1",
+    "announce_url": "https://lists.debian.org/debian-security-announce/2025/msg00050.html",
+    "fixed_versions": [
+      {
+        "release": "bookworm",
+        "version": "10.0.0~dfsg-11+deb12u7",
+        "status": "fixed"
+      }
+    ]
+  },
+  {
+    "date": "2025-03-26",
+    "id": "DSA-5887-1",
+    "package": "exim4",
+    "description": "DSA-5887-1 exim4 security update",
+    "tracker_url": "https://security-tracker.debian.org/tracker/DSA-5887-1",
+    "announce_url": "https://lists.debian.org/debian-security-announce/2025/msg00049.html",
+    "fixed_versions": [
+      {
+        "release": "bookworm",
+        "version": "4.96-15+deb12u7",
+        "status": "fixed"
+      }
+    ]
+  },
+  {
+    "date": "2025-03-25",
+    "id": "DSA-5886-1",
+    "package": "ruby-rack",
+    "description": "DSA-5886-1 ruby-rack security update",
+    "tracker_url": "https://security-tracker.debian.org/tracker/DSA-5886-1",
+    "announce_url": "https://lists.debian.org/debian-security-announce/2025/msg00048.html",
+    "fixed_versions": [
+      {
+        "release": "bookworm",
+        "version": "2.2.13-1~deb12u1",
+        "status": "fixed"
+      }
+    ]
+  },
+  {
+    "date": "2025-03-23",
+    "id": "DSA-5885-1",
+    "package": "webkit2gtk",
+    "description": "DSA-5885-1 webkit2gtk security update",
+    "tracker_url": "https://security-tracker.debian.org/tracker/DSA-5885-1",
+    "announce_url": "https://lists.debian.org/debian-security-announce/2025/msg00047.html",
+    "fixed_versions": [
+      {
+        "release": "bookworm",
+        "version": "2.48.0-1~deb12u1",
+        "status": "fixed"
+      }
+    ]
+  },
+  {
+    "date": "2025-03-23",
+    "id": "DSA-5884-1",
+    "package": "libxslt",
+    "description": "DSA-5884-1 libxslt security update",
+    "tracker_url": "https://security-tracker.debian.org/tracker/DSA-5884-1",
+    "announce_url": "https://lists.debian.org/debian-security-announce/2025/msg00046.html",
+    "fixed_versions": [
+      {
+        "release": "bookworm",
+        "version": "1.1.35-1+deb12u1",
+        "status": "fixed"
+      }
+    ]
+  },
+  {
+    "date": "2025-03-22",
+    "id": "DSA-5883-1",
+    "package": "mercurial",
+    "description": "DSA-5883-1 mercurial security update",
+    "tracker_url": "https://security-tracker.debian.org/tracker/DSA-5883-1",
+    "announce_url": "https://lists.debian.org/debian-security-announce/2025/msg00045.html",
+    "fixed_versions": [
+      {
+        "release": "bookworm",
+        "version": "6.3.2-1+deb12u1",
+        "status": "fixed"
+      }
+    ]
+  },
+  {
+    "date": "2025-03-20",
+    "id": "DSA-5882-1",
+    "package": "chromium",
+    "description": "DSA-5882-1 chromium security update",
+    "tracker_url": "https://security-tracker.debian.org/tracker/DSA-5882-1",
+    "announce_url": "https://lists.debian.org/debian-security-announce/2025/msg00044.html",
+    "fixed_versions": [
+      {
+        "release": "bookworm",
+        "version": "134.0.6998.117-1~deb12u1",
+        "status": "fixed"
+      }
+    ]
+  },
+  {
+    "date": "2025-03-17",
+    "id": "DSA-5881-1",
+    "package": "rails",
+    "description": "DSA-5881-1 rails security update",
+    "tracker_url": "https://security-tracker.debian.org/tracker/DSA-5881-1",
+    "announce_url": "https://lists.debian.org/debian-security-announce/2025/msg00043.html",
+    "fixed_versions": [
+      {
+        "release": "bookworm",
+        "version": "2:6.1.7.10+dfsg-1~deb12u1",
+        "status": "fixed"
+      }
+    ]
+  },
+  {
+    "date": "2025-03-17",
+    "id": "DSA-5880-1",
+    "package": "freetype",
+    "description": "DSA-5880-1 freetype security update",
+    "tracker_url": "https://security-tracker.debian.org/tracker/DSA-5880-1",
+    "announce_url": "https://lists.debian.org/debian-security-announce/2025/msg00042.html",
+    "fixed_versions": [
+      {
+        "release": "bookworm",
+        "version": "2.12.1+dfsg-5+deb12u4",
+        "status": "fixed"
+      }
+    ]
+  },
+  {
+    "date": "2025-03-16",
+    "id": "DSA-5879-1",
+    "package": "opensaml",
+    "description": "DSA-5879-1 opensaml security update",
+    "tracker_url": "https://security-tracker.debian.org/tracker/DSA-5879-1",
+    "announce_url": "https://lists.debian.org/debian-security-announce/2025/msg00041.html",
+    "fixed_versions": [
+      {
+        "release": "bookworm",
+        "version": "3.2.1-3+deb12u1",
+        "status": "fixed"
+      }
+    ]
+  },
+  {
+    "date": "2025-03-14",
+    "id": "DSA-5878-1",
+    "package": "php8.2",
+    "description": "DSA-5878-1 php8.2 security update",
+    "tracker_url": "https://security-tracker.debian.org/tracker/DSA-5878-1",
+    "announce_url": "https://lists.debian.org/debian-security-announce/2025/msg00040.html",
+    "fixed_versions": [
+      {
+        "release": "bookworm",
+        "version": "8.2.28-1~deb12u1",
+        "status": "fixed"
+      }
+    ]
+  },
+  {
+    "date": "2025-03-12",
+    "id": "DSA-5877-1",
+    "package": "chromium",
+    "description": "DSA-5877-1 chromium security update",
+    "tracker_url": "https://security-tracker.debian.org/tracker/DSA-5877-1",
+    "announce_url": "https://lists.debian.org/debian-security-announce/2025/msg00039.html",
+    "fixed_versions": [
+      {
+        "release": "bookworm",
+        "version": "134.0.6998.88-1~deb12u1",
+        "status": "fixed"
+      }
+    ]
+  },
+  {
+    "date": "2025-03-08",
+    "id": "DSA-5876-1",
+    "package": "thunderbird",
+    "description": "DSA-5876-1 thunderbird security update",
+    "tracker_url": "https://security-tracker.debian.org/tracker/DSA-5876-1",
+    "announce_url": "https://lists.debian.org/debian-security-announce/2025/msg00038.html",
+    "fixed_versions": [
+      {
+        "release": "bookworm",
+        "version": "1:128.8.0esr-1~deb12u1",
+        "status": "fixed"
+      }
+    ]
+  },
+  {
+    "date": "2025-03-06",
+    "id": "DSA-5875-1",
+    "package": "chromium",
+    "description": "DSA-5875-1 chromium security update",
+    "tracker_url": "https://security-tracker.debian.org/tracker/DSA-5875-1",
+    "announce_url": "https://lists.debian.org/debian-security-announce/2025/msg00037.html",
+    "fixed_versions": [
+      {
+        "release": "bookworm",
+        "version": "134.0.6998.35-1~deb12u1",
+        "status": "fixed"
+      }
+    ]
+  },
+  {
+    "date": "2025-03-05",
+    "id": "DSA-5874-1",
+    "package": "firefox-esr",
+    "description": "DSA-5874-1 firefox-esr security update",
+    "tracker_url": "https://security-tracker.debian.org/tracker/DSA-5874-1",
+    "announce_url": "https://lists.debian.org/debian-security-announce/2025/msg00036.html",
+    "fixed_versions": [
+      {
+        "release": "bookworm",
+        "version": "128.8.0esr-1~deb12u1",
+        "status": "fixed"
+      }
+    ]
+  },
+  {
+    "date": "2025-03-04",
+    "id": "DSA-5873-1",
+    "package": "libreoffice",
+    "description": "DSA-5873-1 libreoffice security update",
+    "tracker_url": "https://security-tracker.debian.org/tracker/DSA-5873-1",
+    "announce_url": "https://lists.debian.org/debian-security-announce/2025/msg00035.html",
+    "fixed_versions": [
+      {
+        "release": "bookworm",
+        "version": "4:7.4.7-1+deb12u7",
+        "status": "fixed"
+      }
+    ]
+  },
+  {
+    "date": "2025-02-28",
+    "id": "DSA-5872-1",
+    "package": "xorg-server",
+    "description": "DSA-5872-1 xorg-server security update",
+    "tracker_url": "https://security-tracker.debian.org/tracker/DSA-5872-1",
+    "announce_url": "https://lists.debian.org/debian-security-announce/2025/msg00034.html",
+    "fixed_versions": [
+      {
+        "release": "bookworm",
+        "version": "2:21.1.7-3+deb12u9",
+        "status": "fixed"
+      }
+    ]
+  },
+  {
+    "date": "2025-02-27",
+    "id": "DSA-5871-1",
+    "package": "emacs",
+    "description": "DSA-5871-1 emacs security update",
+    "tracker_url": "https://security-tracker.debian.org/tracker/DSA-5871-1",
+    "announce_url": "https://lists.debian.org/debian-security-announce/2025/msg00033.html",
+    "fixed_versions": [
+      {
+        "release": "bookworm",
+        "version": "1:28.2+1-15+deb12u4",
+        "status": "fixed"
+      }
+    ]
+  },
+  {
+    "date": "2025-02-26",
+    "id": "DSA-5870-1",
+    "package": "openh264",
+    "description": "DSA-5870-1 openh264 security update",
+    "tracker_url": "https://security-tracker.debian.org/tracker/DSA-5870-1",
+    "announce_url": "https://lists.debian.org/debian-security-announce/2025/msg00032.html",
+    "fixed_versions": [
+      {
+        "release": "bookworm",
+        "version": "2.3.1+dfsg-3+deb12u1",
+        "status": "fixed"
+      }
+    ]
+  },
+  {
+    "date": "2025-02-21",
+    "id": "DSA-5869-1",
+    "package": "chromium",
+    "description": "DSA-5869-1 chromium security update",
+    "tracker_url": "https://security-tracker.debian.org/tracker/DSA-5869-1",
+    "announce_url": "https://lists.debian.org/debian-security-announce/2025/msg00031.html",
+    "fixed_versions": [
+      {
+        "release": "bookworm",
+        "version": "133.0.6943.126-1~deb12u1",
+        "status": "fixed"
+      }
+    ]
+  },
+  {
+    "date": "2025-02-18",
+    "id": "DSA-5868-1",
+    "package": "openssh",
+    "description": "DSA-5868-1 openssh security update",
+    "tracker_url": "https://security-tracker.debian.org/tracker/DSA-5868-1",
+    "announce_url": "https://lists.debian.org/debian-security-announce/2025/msg00030.html",
+    "fixed_versions": [
+      {
+        "release": "bookworm",
+        "version": "1:9.2p1-2+deb12u5",
+        "status": "fixed"
+      }
+    ]
+  },
+  {
+    "date": "2025-02-17",
+    "id": "DSA-5867-1",
+    "package": "gnutls28",
+    "description": "DSA-5867-1 gnutls28 security update",
+    "tracker_url": "https://security-tracker.debian.org/tracker/DSA-5867-1",
+    "announce_url": "https://lists.debian.org/debian-security-announce/2025/msg00029.html",
+    "fixed_versions": [
+      {
+        "release": "bookworm",
+        "version": "3.7.9-2+deb12u4",
+        "status": "fixed"
+      }
+    ]
+  },
+  {
+    "date": "2025-02-14",
+    "id": "DSA-5866-1",
+    "package": "chromium",
+    "description": "DSA-5866-1 chromium security update",
+    "tracker_url": "https://security-tracker.debian.org/tracker/DSA-5866-1",
+    "announce_url": "https://lists.debian.org/debian-security-announce/2025/msg00028.html",
+    "fixed_versions": [
+      {
+        "release": "bookworm",
+        "version": "133.0.6943.98-1~deb12u1",
+        "status": "fixed"
+      }
+    ]
+  },
+  {
+    "date": "2025-02-12",
+    "id": "DSA-5865-1",
+    "package": "webkit2gtk",
+    "description": "DSA-5865-1 webkit2gtk security update",
+    "tracker_url": "https://security-tracker.debian.org/tracker/DSA-5865-1",
+    "announce_url": "https://lists.debian.org/debian-security-announce/2025/msg00027.html",
+    "fixed_versions": [
+      {
+        "release": "bookworm",
+        "version": "2.46.6-1~deb12u1",
+        "status": "fixed"
+      }
+    ]
+  },
+  {
+    "date": "2025-02-12",
+    "id": "DSA-5864-1",
+    "package": "pam-pkcs11",
+    "description": "DSA-5864-1 pam-pkcs11 security update",
+    "tracker_url": "https://security-tracker.debian.org/tracker/DSA-5864-1",
+    "announce_url": "https://lists.debian.org/debian-security-announce/2025/msg00026.html",
+    "fixed_versions": [
+      {
+        "release": "bookworm",
+        "version": "0.6.12-1+deb12u1",
+        "status": "fixed"
+      }
+    ]
+  },
+  {
+    "date": "2025-02-10",
+    "id": "DSA-5863-1",
+    "package": "libtasn1-6",
+    "description": "DSA-5863-1 libtasn1-6 security update",
+    "tracker_url": "https://security-tracker.debian.org/tracker/DSA-5863-1",
+    "announce_url": "https://lists.debian.org/debian-security-announce/2025/msg00025.html",
+    "fixed_versions": [
+      {
+        "release": "bookworm",
+        "version": "4.19.0-2+deb12u1",
+        "status": "fixed"
+      }
+    ]
+  },
+  {
+    "date": "2025-02-10",
+    "id": "DSA-5862-1",
+    "package": "cacti",
+    "description": "DSA-5862-1 cacti security update",
+    "tracker_url": "https://security-tracker.debian.org/tracker/DSA-5862-1",
+    "announce_url": "https://lists.debian.org/debian-security-announce/2025/msg00024.html",
+    "fixed_versions": [
+      {
+        "release": "bookworm",
+        "version": "1.2.24+ds1-1+deb12u5",
+        "status": "fixed"
+      }
+    ]
+  },
+  {
+    "date": "2025-02-07",
+    "id": "DSA-5861-1",
+    "package": "thunderbird",
+    "description": "DSA-5861-1 thunderbird security update",
+    "tracker_url": "https://security-tracker.debian.org/tracker/DSA-5861-1",
+    "announce_url": "https://lists.debian.org/debian-security-announce/2025/msg00022.html",
+    "fixed_versions": [
+      {
+        "release": "bookworm",
+        "version": "1:128.7.0esr-1~deb12u1",
+        "status": "fixed"
+      }
+    ]
+  },
+  {
+    "date": "2025-02-08",
+    "id": "DSA-5860-1",
+    "package": "linux",
+    "description": "DSA-5860-1 linux security update",
+    "tracker_url": "https://security-tracker.debian.org/tracker/DSA-5860-1",
+    "announce_url": "https://lists.debian.org/debian-security-announce/2025/msg00023.html",
+    "fixed_versions": [
+      {
+        "release": "bookworm",
+        "version": "6.1.128-1",
+        "status": "fixed"
+      }
+    ]
+  },
+  {
+    "date": "2025-02-05",
+    "id": "DSA-5859-1",
+    "package": "chromium",
+    "description": "DSA-5859-1 chromium security update",
+    "tracker_url": "https://security-tracker.debian.org/tracker/DSA-5859-1",
+    "announce_url": "https://lists.debian.org/debian-security-announce/2025/msg00021.html",
+    "fixed_versions": [
+      {
+        "release": "bookworm",
+        "version": "133.0.6943.53-1~deb12u1",
+        "status": "fixed"
+      }
+    ]
+  },
+  {
+    "date": "2025-02-05",
+    "id": "DSA-5858-1",
+    "package": "firefox-esr",
+    "description": "DSA-5858-1 firefox-esr security update",
+    "tracker_url": "https://security-tracker.debian.org/tracker/DSA-5858-1",
+    "announce_url": "https://lists.debian.org/debian-security-announce/2025/msg00020.html",
+    "fixed_versions": [
+      {
+        "release": "bookworm",
+        "version": "128.7.0esr-1~deb12u1",
+        "status": "fixed"
+      }
+    ]
+  },
+  {
+    "date": "2025-02-03",
+    "id": "DSA-5857-1",
+    "package": "openjdk-17",
+    "description": "DSA-5857-1 openjdk-17 security update",
+    "tracker_url": "https://security-tracker.debian.org/tracker/DSA-5857-1",
+    "announce_url": "https://lists.debian.org/debian-security-announce/2025/msg00019.html",
+    "fixed_versions": [
+      {
+        "release": "bookworm",
+        "version": "17.0.14+7-1~deb12u1",
+        "status": "fixed"
+      }
+    ]
+  },
+  {
+    "date": "2025-01-30",
+    "id": "DSA-5856-1",
+    "package": "redis",
+    "description": "DSA-5856-1 redis security update",
+    "tracker_url": "https://security-tracker.debian.org/tracker/DSA-5856-1",
+    "announce_url": "https://lists.debian.org/debian-security-announce/2025/msg00018.html",
+    "fixed_versions": [
+      {
+        "release": "bookworm",
+        "version": "5:7.0.15-1~deb12u3",
+        "status": "fixed"
+      }
+    ]
+  },
+  {
+    "date": "2025-01-30",
+    "id": "DSA-5855-1",
+    "package": "chromium",
+    "description": "DSA-5855-1 chromium security update",
+    "tracker_url": "https://security-tracker.debian.org/tracker/DSA-5855-1",
+    "announce_url": "https://lists.debian.org/debian-security-announce/2025/msg00017.html",
+    "fixed_versions": [
+      {
+        "release": "bookworm",
+        "version": "132.0.6834.159-1~deb12u1",
+        "status": "fixed"
+      }
+    ]
+  },
+  {
+    "date": "2025-01-29",
+    "id": "DSA-5854-1",
+    "package": "bind9",
+    "description": "DSA-5854-1 bind9 security update",
+    "tracker_url": "https://security-tracker.debian.org/tracker/DSA-5854-1",
+    "announce_url": "https://lists.debian.org/debian-security-announce/2025/msg00016.html",
+    "fixed_versions": [
+      {
+        "release": "bookworm",
+        "version": "1:9.18.33-1~deb12u2",
+        "status": "fixed"
+      }
+    ]
+  },
+  {
+    "date": "2025-01-29",
+    "id": "DSA-5853-1",
+    "package": "pam-u2f",
+    "description": "DSA-5853-1 pam-u2f security update",
+    "tracker_url": "https://security-tracker.debian.org/tracker/DSA-5853-1",
+    "announce_url": "https://lists.debian.org/debian-security-announce/2025/msg00015.html",
+    "fixed_versions": [
+      {
+        "release": "bookworm",
+        "version": "1.1.0-1.1+deb12u1",
+        "status": "fixed"
+      }
+    ]
+  },
+  {
+    "date": "2025-01-28",
+    "id": "DSA-5852-1",
+    "package": "pdns-recursor",
+    "description": "DSA-5852-1 pdns-recursor security update",
+    "tracker_url": "https://security-tracker.debian.org/tracker/DSA-5852-1",
+    "announce_url": "https://lists.debian.org/debian-security-announce/2025/msg00014.html",
+    "fixed_versions": [
+      {
+        "release": "bookworm",
+        "version": "4.8.8-1+deb12u1",
+        "status": "fixed"
+      }
+    ]
+  },
+  {
+    "date": "2025-01-27",
+    "id": "DSA-5851-1",
+    "package": "openjpeg2",
+    "description": "DSA-5851-1 openjpeg2 security update",
+    "tracker_url": "https://security-tracker.debian.org/tracker/DSA-5851-1",
+    "announce_url": "https://lists.debian.org/debian-security-announce/2025/msg00013.html",
+    "fixed_versions": [
+      {
+        "release": "bookworm",
+        "version": "2.5.0-2+deb12u1",
+        "status": "fixed"
+      }
+    ]
+  },
+  {
+    "date": "2025-01-26",
+    "id": "DSA-5850-1",
+    "package": "git",
+    "description": "DSA-5850-1 git security update",
+    "tracker_url": "https://security-tracker.debian.org/tracker/DSA-5850-1",
+    "announce_url": "https://lists.debian.org/debian-security-announce/2025/msg00012.html",
+    "fixed_versions": [
+      {
+        "release": "bookworm",
+        "version": "1:2.39.5-0+deb12u2",
+        "status": "fixed"
+      }
+    ]
+  },
+  {
+    "date": "2025-01-24",
+    "id": "DSA-5849-1",
+    "package": "git-lfs",
+    "description": "DSA-5849-1 git-lfs security update",
+    "tracker_url": "https://security-tracker.debian.org/tracker/DSA-5849-1",
+    "announce_url": "https://lists.debian.org/debian-security-announce/2025/msg00011.html",
+    "fixed_versions": [
+      {
+        "release": "bookworm",
+        "version": "3.3.0-1+deb12u1",
+        "status": "fixed"
+      }
+    ]
+  },
+  {
+    "date": "2025-01-23",
+    "id": "DSA-5848-1",
+    "package": "chromium",
+    "description": "DSA-5848-1 chromium security update",
+    "tracker_url": "https://security-tracker.debian.org/tracker/DSA-5848-1",
+    "announce_url": "https://lists.debian.org/debian-security-announce/2025/msg00010.html",
+    "fixed_versions": [
+      {
+        "release": "bookworm",
+        "version": "132.0.6834.110-1~deb12u1",
+        "status": "fixed"
+      }
+    ]
+  },
+  {
+    "date": "2025-01-21",
+    "id": "DSA-5847-1",
+    "package": "snapcast",
+    "description": "DSA-5847-1 snapcast security update",
+    "tracker_url": "https://security-tracker.debian.org/tracker/DSA-5847-1",
+    "announce_url": "https://lists.debian.org/debian-security-announce/2025/msg00009.html",
+    "fixed_versions": [
+      {
+        "release": "bookworm",
+        "version": "0.26.0+dfsg1-1+deb12u1",
+        "status": "fixed"
+      }
+    ]
+  },
+  {
+    "date": "2025-01-19",
+    "id": "DSA-5846-1",
+    "package": "libreoffice",
+    "description": "DSA-5846-1 libreoffice security update",
+    "tracker_url": "https://security-tracker.debian.org/tracker/DSA-5846-1",
+    "announce_url": "https://lists.debian.org/debian-security-announce/2025/msg00008.html",
+    "fixed_versions": [
+      {
+        "release": "bookworm",
+        "version": "4:7.4.7-1+deb12u6",
         "status": "fixed"
       }
     ]

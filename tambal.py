@@ -283,6 +283,27 @@ def fetch_sources(repo_url, dist, component):
     return packages
 
 
+def build_sid_index(repo_url):
+    """Fetch source package versions from the 'sid' dist of an upstream repo."""
+    print(f"Fetching sid index from upstream {repo_url} ...", file=sys.stderr)
+    _, components = fetch_release(repo_url, "sid")
+    if not components:
+        print("  Warning: sid release not found or has no components.", file=sys.stderr)
+        return {}
+
+    index = {}
+    for component in components:
+        print(f"  Fetching sid/{component}/source/Sources.gz ...", file=sys.stderr)
+        pkgs = fetch_sources(repo_url, "sid", component)
+        for pkg, ver in pkgs.items():
+            existing = index.get(pkg)
+            if existing is None or version_lt(existing, ver):
+                index[pkg] = ver
+
+    print(f"  Indexed {len(index)} source packages from sid.", file=sys.stderr)
+    return index
+
+
 def build_package_index(repo_url):
     """
     Walk all dists and components in the repo and return a unified
@@ -359,7 +380,7 @@ def evaluate(advisories, package_index):
 
 # ── html report ───────────────────────────────────────────────────────────────
 
-def write_html_report(findings, html_dir, repo_url):
+def write_html_report(findings, html_dir, repo_url, upstream_repo=None):
     import html as _html
 
     generated_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -397,12 +418,18 @@ def write_html_report(findings, html_dir, repo_url):
             f'</tr>'
             for v in sorted_versions
         )
+        upstream_ver = f.get("upstream_version")
+        upstream_cell = (
+            f'<td>{e(upstream_ver)}</td>' if upstream_ver is not None else ""
+        )
+
         rows.append(f"""
         <tr>
           <td>{e(f['date'])}</td>
           <td>{e(f['package'])}</td>
           <td><a href="{e(f['announce_url'])}" target="_blank">{e(f['advisory_id'])}</a> | <a href="{e(f['tracker_url'])}" target="_blank">Tracker</a></td>
           <td class="{ver_class}">{e(f['repo_version'])}</td>
+          {upstream_cell}
           <td>
             <table class="inner">
               <tr><th>Release</th><th>Version</th><th>Status</th></tr>
@@ -453,8 +480,9 @@ def write_html_report(findings, html_dir, repo_url):
         <th>Date</th>
         <th>Package</th>
         <th>Advisory</th>
-        <th>Repo version</th>
-        <th>Fixed Versions</th>
+        <th>Our version</th>
+        {"<th>Upstream version (Sid)</th>" if upstream_repo else ""}
+        <th>Fixed version in stable releases</th>
       </tr>
     </thead>
     <tbody>
@@ -476,6 +504,7 @@ def write_html_report(findings, html_dir, repo_url):
 
 def main():
     repo_url = None
+    upstream_repo = None
     since = None
     output = ADVISORIES_FILE
     no_cache = False
@@ -484,6 +513,8 @@ def main():
     for arg in sys.argv[1:]:
         if arg.startswith("--repo=") or arg.startswith("--repository="):
             repo_url = arg.split("=", 1)[1]
+        elif arg.startswith("--upstream-repo="):
+            upstream_repo = arg.split("=", 1)[1]
         elif arg.startswith("--since="):
             val = arg.split("=", 1)[1]
             try:
@@ -526,20 +557,28 @@ def main():
     # Step 2: evaluate repo
     package_index = build_package_index(repo_url)
 
+    upstream_index = {}
+    if upstream_repo:
+        upstream_index = build_sid_index(upstream_repo)
+
     print("Evaluating advisories ...", file=sys.stderr)
     findings = evaluate(advisories, package_index)
+
+    if upstream_index:
+        for f in findings:
+            f["upstream_version"] = upstream_index.get(f["package"])
 
     if not findings:
         print("No vulnerable packages found.", file=sys.stderr)
         if html_dir:
-            write_html_report(findings, html_dir, repo_url)
+            write_html_report(findings, html_dir, repo_url, upstream_repo=upstream_repo)
         sys.exit(0)
 
     print(f"Found {len(findings)} potentially vulnerable package(s):\n", file=sys.stderr)
 
     for f in findings:
         print(f"[{f['date']}] {f['advisory_id']}  {f['package']}")
-        print(f"  Repo version : {f['repo_version']}")
+        print(f"  Our version : {f['repo_version']}")
         for v in f["vulnerable_against"]:
             print(f"  Below fix    : {v['fixed_version']}  (for {v['release']}, status: {v['status']})")
         print(f"  Description  : {f['description']}")
@@ -547,7 +586,7 @@ def main():
         print()
 
     if html_dir:
-        write_html_report(findings, html_dir, repo_url)
+        write_html_report(findings, html_dir, repo_url, upstream_repo=upstream_repo)
 
 
 if __name__ == "__main__":
