@@ -1,0 +1,7 @@
+# Tambal
+
+1. Debian DSA and fetch the fixed version of packages
+2. Evaluate the packages in targeted repository (WIP)
+3. Automate the update to repository (WIP)
+
+This is part of BlankOn's responsibility as derivative distribution.
