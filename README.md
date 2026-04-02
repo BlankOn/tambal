@@ -5,3 +5,9 @@
 3. Automate the update to repository (WIP)
 
 This is part of BlankOn's responsibility as derivative distribution.
+
+## Usage
+
+```
+python3 tambal.py --repo=http://arsip-dev.blankonlinux.id/dev/ --output=./advisories.json --html=./security-advisories
+```
