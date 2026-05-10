@@ -274,6 +274,9 @@ def _parse_fixed_versions(html):
             continue
         for release in release_str.split(","):
             release = release.replace(" (security)", "").strip()
+            # Map "(unstable)" to "sid" for consistency
+            if release == "(unstable)":
+                release = "sid"
             if not release:
                 continue
             if release not in status_map or status == "fixed":
@@ -283,10 +286,16 @@ def _parse_fixed_versions(html):
     for row in fix_rows:
         release = row.get("Release", "").strip()
         version = row.get("Fixed Version", "").strip()
-        if not release or release.startswith("("):
-            continue  # skip placeholders like "(unstable)"
+
+        # Map "(unstable)" to "sid" for consistency
+        if release == "(unstable)":
+            release = "sid"
+        elif not release or release.startswith("("):
+            continue  # skip other placeholders
+
         if version.startswith("("):
             continue  # skip placeholders like "(unfixed)"
+
         results.append({
             "release": release,
             "version": version,
