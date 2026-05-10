@@ -286,6 +286,7 @@ def _parse_fixed_versions(html):
     for row in fix_rows:
         release = row.get("Release", "").strip()
         version = row.get("Fixed Version", "").strip()
+        source_pkg = row.get("Package", "").strip()
 
         # Map "(unstable)" to "sid" for consistency
         if release == "(unstable)":
@@ -296,54 +297,68 @@ def _parse_fixed_versions(html):
         if version.startswith("("):
             continue  # skip placeholders like "(unfixed)"
 
-        results.append({
+        entry = {
             "release": release,
             "version": version,
             "status": status_map.get(release, "fixed"),
-        })
+        }
+        if source_pkg:
+            entry["source_pkg"] = source_pkg
+        results.append(entry)
 
     return results, None
 
 
+def _fetch_cve_versions(cve):
+    """Fetch and parse fixed versions for a single CVE ID. Returns (entries, error)."""
+    url = f"https://security-tracker.debian.org/tracker/{cve}"
+    try:
+        html = fetch(url)
+    except Exception as e:
+        return [], str(e)
+    return _parse_fixed_versions(html)
+
+
 def fetch_tracker_details(url):
     """
-    Return (entries, error, multi_cve, cves) where entries is a list of
-    {release, version, status} dicts and cves is a list of CVE IDs.
+    Return (entries, error, multi_cve, cves, cve_versions) where:
+      - entries: flat list of {release, version, status} (no-CVE fallback only)
+      - error: error string or None
+      - multi_cve: True when >= 6 CVEs (too many to track individually)
+      - cves: list of CVE IDs found in References
+      - cve_versions: dict {cve_id: [entries]} for 1-5 CVE advisories, else {}
 
-    Inspects the References row of the DSA page:
-      - multiple CVEs → caller marks the package as "Vulnerable - multiple CVEs"
-        (returns ([], None, True, cves))
-      - single CVE → follows the CVE link and parses the (more complete)
-        'Vulnerable and fixed packages' table on the CVE page
-      - no CVE found → falls back to parsing the DSA page directly
+    Behaviour by CVE count:
+      0 CVEs  → parse DSA page directly; cve_versions = {}
+      1-5 CVEs → fetch each CVE page; cve_versions = {cve: entries, ...}
+      ≥ 6 CVEs → multi_cve = True; cve_versions = {}
     """
     try:
         html = fetch(url)
     except Exception as e:
-        return [], str(e), False, []
+        return [], str(e), False, [], {}
 
     cves = extract_references_cves(html)
 
-    if len(cves) > 1:
-        return [], None, True, cves
+    if len(cves) >= 6:
+        return [], None, True, cves, {}
 
-    if len(cves) == 1:
-        cve_url = f"https://security-tracker.debian.org/tracker/{cves[0]}"
-        try:
-            cve_html = fetch(cve_url)
-        except Exception as e:
-            # Couldn't fetch the CVE page; fall back to the DSA page.
-            results, err = _parse_fixed_versions(html)
-            return results, err or str(e), False, cves
-        results, err = _parse_fixed_versions(cve_html)
-        if err:
-            # CVE page didn't parse; fall back to the DSA page.
-            results, err2 = _parse_fixed_versions(html)
-            return results, err2, False, cves
-        return results, None, False, cves
+    if len(cves) >= 1:
+        cve_versions = {}
+        errors = []
+        for cve in cves:
+            entries, err = _fetch_cve_versions(cve)
+            if err:
+                errors.append(f"{cve}: {err}")
+            else:
+                cve_versions[cve] = entries
+            time.sleep(0.1)
+        err_msg = "; ".join(errors) if errors else None
+        return [], err_msg, False, cves, cve_versions
 
+    # No CVEs — fall back to parsing the DSA page directly.
     results, err = _parse_fixed_versions(html)
-    return results, err, False, cves
+    return results, err, False, cves, {}
 
 
 # ── evaluate: repo discovery ──────────────────────────────────────────────────
@@ -480,48 +495,71 @@ def evaluate(advisories, package_index):
             })
             continue
 
-        fixed_versions = []
-        is_vulnerable = False
-        for fv in adv.get("fixed_versions", []):
-            fixed_ver = fv.get("version", "").strip()
-            status = fv.get("status", "").strip()
-            if not fixed_ver:
-                continue
+        def _annotate_entries(fv_list):
+            """Annotate a list of fixed-version entries with below=True/False."""
+            out = []
+            vuln = False
+            for fv in fv_list:
+                fixed_ver = fv.get("version", "").strip()
+                status = fv.get("status", "").strip()
+                if not fixed_ver:
+                    continue
+                below = False
+                if status == "fixed":
+                    below = version_lt(repo_ver, fixed_ver)
+                elif status in ("vulnerable", "unfixed"):
+                    below = not version_lt(repo_ver, fixed_ver)
+                if below:
+                    vuln = True
+                out.append({
+                    "release": fv["release"],
+                    "fixed_version": fixed_ver,
+                    "status": status,
+                    "below": below,
+                })
+            return out, vuln
 
-            # Determine vulnerability based on status and version comparison
-            below = False
-            if status == "fixed":
-                # For "fixed" status: vulnerable if our version < fixed version
-                below = version_lt(repo_ver, fixed_ver)
-            elif status == "vulnerable":
-                # For "vulnerable" status: vulnerable if our version >= the vulnerable version
-                below = not version_lt(repo_ver, fixed_ver)
-            elif status == "unfixed":
-                # For "unfixed" status: vulnerable if our version >= the unfixed version
-                below = not version_lt(repo_ver, fixed_ver)
-            # For other statuses, don't flag as vulnerable
+        adv_cve_versions = adv.get("cve_versions", {})
+        if adv_cve_versions:
+            # 1-5 CVEs: evaluate each CVE independently.
+            is_vulnerable = False
+            result_cve_versions = {}
+            for cve, fv_list in adv_cve_versions.items():
+                annotated, vuln = _annotate_entries(fv_list)
+                result_cve_versions[cve] = annotated
+                if vuln:
+                    is_vulnerable = True
 
-            if below:
-                is_vulnerable = True
-            fixed_versions.append({
-                "release": fv["release"],
-                "fixed_version": fixed_ver,
-                "status": status,
-                "below": below,
-            })
-
-        if is_vulnerable:
-            findings.append({
-                "advisory_id": adv["id"],
-                "date": adv["date"],
-                "package": pkg,
-                "repo_version": repo_ver,
-                "description": adv["description"],
-                "announce_url": adv["announce_url"],
-                "tracker_url": adv["tracker_url"],
-                "vulnerable_against": fixed_versions,
-                "cves": adv.get("cves", []),
-            })
+            if is_vulnerable:
+                findings.append({
+                    "advisory_id": adv["id"],
+                    "date": adv["date"],
+                    "package": pkg,
+                    "repo_version": repo_ver,
+                    "description": adv["description"],
+                    "announce_url": adv["announce_url"],
+                    "tracker_url": adv["tracker_url"],
+                    "cve_versions": result_cve_versions,
+                    "vulnerable_against": [
+                        e for entries in result_cve_versions.values() for e in entries
+                    ],
+                    "cves": adv.get("cves", []),
+                })
+        else:
+            # No CVEs: fall back to flat fixed_versions list.
+            fixed_versions, is_vulnerable = _annotate_entries(adv.get("fixed_versions", []))
+            if is_vulnerable:
+                findings.append({
+                    "advisory_id": adv["id"],
+                    "date": adv["date"],
+                    "package": pkg,
+                    "repo_version": repo_ver,
+                    "description": adv["description"],
+                    "announce_url": adv["announce_url"],
+                    "tracker_url": adv["tracker_url"],
+                    "vulnerable_against": fixed_versions,
+                    "cves": adv.get("cves", []),
+                })
 
     return findings
 
@@ -536,16 +574,64 @@ def write_html_report(findings, html_dir, repo_url, upstream_repo=None):
     def e(s):
         return _html.escape(str(s))
 
+    import functools
+
+    def _sort_entries(entries):
+        def _cmp_ver(a, b):
+            if version_lt(a["fixed_version"], b["fixed_version"]):
+                return 1
+            if version_lt(b["fixed_version"], a["fixed_version"]):
+                return -1
+            return 0
+        return sorted(entries, key=functools.cmp_to_key(_cmp_ver))
+
+    def _entries_to_rows(entries):
+        # Group by source_pkg when multiple source packages are present.
+        pkgs = []
+        seen = {}
+        for v in entries:
+            sp = v.get("source_pkg", "")
+            if sp not in seen:
+                seen[sp] = []
+                pkgs.append(sp)
+            seen[sp].append(v)
+
+        if len(pkgs) > 1:
+            html_rows = []
+            for sp in pkgs:
+                html_rows.append(
+                    f'<tr><td colspan="3" style="background:#f5f5f5; font-style:italic; font-size:0.82em;">'
+                    f'{e(sp)}</td></tr>'
+                )
+                for v in _sort_entries(seen[sp]):
+                    html_rows.append(
+                        f'<tr>'
+                        f'<td>{e(v["release"])}</td>'
+                        f'<td>{e(v["fixed_version"])}</td>'
+                        f'<td>{e(v["status"])}</td>'
+                        f'</tr>'
+                    )
+            return "".join(html_rows)
+
+        return "".join(
+            f'<tr>'
+            f'<td>{e(v["release"])}</td>'
+            f'<td>{e(v["fixed_version"])}</td>'
+            f'<td>{e(v["status"])}</td>'
+            f'</tr>'
+            for v in _sort_entries(entries)
+        )
+
     rows = []
     for f in findings:
         if f.get("multi_cve"):
             ver_class = "ver-below"
             fixes = (
-                '<tr><td colspan="3"><strong>Vulnerable - multiple CVEs</strong>'
+                '<tr><td colspan="3"><strong>Vulnerable - multiple CVEs (≥ 6)</strong>'
                 ' — see tracker for details.</td></tr>'
             )
-        else:
-            # Find the latest fixed version across all releases to compare repo version against
+        elif f.get("cve_versions") and len(f["cve_versions"]) > 1:
+            # Multiple tracked CVEs: one sub-table per CVE.
             all_fixed = [v["fixed_version"] for v in f["vulnerable_against"] if v["fixed_version"]]
             latest_fixed = None
             for fv in all_fixed:
@@ -554,25 +640,25 @@ def write_html_report(findings, html_dir, repo_url, upstream_repo=None):
             repo_below_latest = latest_fixed is not None and version_lt(f["repo_version"], latest_fixed)
             ver_class = "ver-below" if repo_below_latest else "ver-above"
 
-            import functools
-            def _cmp_ver(a, b):
-                if version_lt(a["fixed_version"], b["fixed_version"]):
-                    return 1   # a < b → a comes after b (descending)
-                if version_lt(b["fixed_version"], a["fixed_version"]):
-                    return -1  # b < a → a comes before b
-                return 0
-            sorted_versions = sorted(
-                f["vulnerable_against"],
-                key=functools.cmp_to_key(_cmp_ver),
-            )
-            fixes = "".join(
-                f'<tr>'
-                f'<td>{e(v["release"])}</td>'
-                f'<td>{e(v["fixed_version"])}</td>'
-                f'<td>{e(v["status"])}</td>'
-                f'</tr>'
-                for v in sorted_versions
-            )
+            cve_blocks = []
+            for cve_id, entries in f["cve_versions"].items():
+                cve_url = f"https://security-tracker.debian.org/tracker/{e(cve_id)}"
+                header = (
+                    f'<tr><td colspan="3" style="background:#f0f4ff; font-weight:bold; font-size:0.82em;">'
+                    f'<a href="{cve_url}" target="_blank">{e(cve_id)}</a></td></tr>'
+                )
+                cve_blocks.append(header + _entries_to_rows(entries))
+            fixes = "".join(cve_blocks)
+        else:
+            # Single CVE or no CVE: flat table.
+            all_fixed = [v["fixed_version"] for v in f["vulnerable_against"] if v["fixed_version"]]
+            latest_fixed = None
+            for fv in all_fixed:
+                if latest_fixed is None or version_lt(latest_fixed, fv):
+                    latest_fixed = fv
+            repo_below_latest = latest_fixed is not None and version_lt(f["repo_version"], latest_fixed)
+            ver_class = "ver-below" if repo_below_latest else "ver-above"
+            fixes = _entries_to_rows(f["vulnerable_against"])
         upstream_ver = f.get("upstream_version")
         upstream_cell = (
             f'<td>{e(upstream_ver)}</td>' if upstream_ver is not None else ""
@@ -715,12 +801,13 @@ def main():
         results = []
         for i, adv in enumerate(advisories, 1):
             print(f"  [{i}/{len(advisories)}] {adv['id']} ...", file=sys.stderr, end="\r")
-            details, err, multi_cve, cves = fetch_tracker_details(adv["tracker_url"])
+            details, err, multi_cve, cves, cve_versions = fetch_tracker_details(adv["tracker_url"])
             if err:
                 print(f"\n  Warning: {adv['id']}: {err}", file=sys.stderr)
             adv["fixed_versions"] = details
             adv["multi_cve"] = multi_cve
             adv["cves"] = cves
+            adv["cve_versions"] = cve_versions
             results.append(adv)
             time.sleep(0.3)
 
