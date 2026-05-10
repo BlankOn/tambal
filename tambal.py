@@ -483,15 +483,29 @@ def evaluate(advisories, package_index):
         is_vulnerable = False
         for fv in adv.get("fixed_versions", []):
             fixed_ver = fv.get("version", "").strip()
+            status = fv.get("status", "").strip()
             if not fixed_ver:
                 continue
-            below = version_lt(repo_ver, fixed_ver)
+
+            # Determine vulnerability based on status and version comparison
+            below = False
+            if status == "fixed":
+                # For "fixed" status: vulnerable if our version < fixed version
+                below = version_lt(repo_ver, fixed_ver)
+            elif status == "vulnerable":
+                # For "vulnerable" status: vulnerable if our version >= the vulnerable version
+                below = not version_lt(repo_ver, fixed_ver)
+            elif status == "unfixed":
+                # For "unfixed" status: vulnerable if our version >= the unfixed version
+                below = not version_lt(repo_ver, fixed_ver)
+            # For other statuses, don't flag as vulnerable
+
             if below:
                 is_vulnerable = True
             fixed_versions.append({
                 "release": fv["release"],
                 "fixed_version": fixed_ver,
-                "status": fv.get("status", ""),
+                "status": status,
                 "below": below,
             })
 
