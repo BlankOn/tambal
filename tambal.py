@@ -307,12 +307,12 @@ def _parse_fixed_versions(html):
 
 def fetch_tracker_details(url):
     """
-    Return (entries, error, multi_cve) where entries is a list of
-    {release, version, status} dicts.
+    Return (entries, error, multi_cve, cves) where entries is a list of
+    {release, version, status} dicts and cves is a list of CVE IDs.
 
     Inspects the References row of the DSA page:
       - multiple CVEs → caller marks the package as "Vulnerable - multiple CVEs"
-        (returns ([], None, True))
+        (returns ([], None, True, cves))
       - single CVE → follows the CVE link and parses the (more complete)
         'Vulnerable and fixed packages' table on the CVE page
       - no CVE found → falls back to parsing the DSA page directly
@@ -320,12 +320,12 @@ def fetch_tracker_details(url):
     try:
         html = fetch(url)
     except Exception as e:
-        return [], str(e), False
+        return [], str(e), False, []
 
     cves = extract_references_cves(html)
 
     if len(cves) > 1:
-        return [], None, True
+        return [], None, True, cves
 
     if len(cves) == 1:
         cve_url = f"https://security-tracker.debian.org/tracker/{cves[0]}"
@@ -334,16 +334,16 @@ def fetch_tracker_details(url):
         except Exception as e:
             # Couldn't fetch the CVE page; fall back to the DSA page.
             results, err = _parse_fixed_versions(html)
-            return results, err or str(e), False
+            return results, err or str(e), False, cves
         results, err = _parse_fixed_versions(cve_html)
         if err:
             # CVE page didn't parse; fall back to the DSA page.
             results, err2 = _parse_fixed_versions(html)
-            return results, err2, False
-        return results, None, False
+            return results, err2, False, cves
+        return results, None, False, cves
 
     results, err = _parse_fixed_versions(html)
-    return results, err, False
+    return results, err, False, cves
 
 
 # ── evaluate: repo discovery ──────────────────────────────────────────────────
@@ -476,6 +476,7 @@ def evaluate(advisories, package_index):
                 "tracker_url": adv["tracker_url"],
                 "vulnerable_against": [],
                 "multi_cve": True,
+                "cves": adv.get("cves", []),
             })
             continue
 
@@ -519,6 +520,7 @@ def evaluate(advisories, package_index):
                 "announce_url": adv["announce_url"],
                 "tracker_url": adv["tracker_url"],
                 "vulnerable_against": fixed_versions,
+                "cves": adv.get("cves", []),
             })
 
     return findings
@@ -576,11 +578,29 @@ def write_html_report(findings, html_dir, repo_url, upstream_repo=None):
             f'<td>{e(upstream_ver)}</td>' if upstream_ver is not None else ""
         )
 
+        # Build CVE links
+        cves = f.get("cves", [])
+        if cves:
+            cve_links = ", ".join(
+                f'<a href="https://security-tracker.debian.org/tracker/{e(cve)}" target="_blank">{e(cve)}</a>'
+                for cve in cves
+            )
+            advisory_cell = (
+                f'<div><a href="{e(f["announce_url"])}" target="_blank">{e(f["advisory_id"])}</a> | '
+                f'<a href="{e(f["tracker_url"])}" target="_blank">Tracker</a></div>'
+                f'<div style="font-size: 0.85em; color: #666; margin-top: 0.25rem;">CVE: {cve_links}</div>'
+            )
+        else:
+            advisory_cell = (
+                f'<a href="{e(f["announce_url"])}" target="_blank">{e(f["advisory_id"])}</a> | '
+                f'<a href="{e(f["tracker_url"])}" target="_blank">Tracker</a>'
+            )
+
         rows.append(f"""
         <tr>
           <td>{e(f['date'])}</td>
           <td>{e(f['package'])}</td>
-          <td><a href="{e(f['announce_url'])}" target="_blank">{e(f['advisory_id'])}</a> | <a href="{e(f['tracker_url'])}" target="_blank">Tracker</a></td>
+          <td>{advisory_cell}</td>
           <td class="{ver_class}">{e(f['repo_version'])}</td>
           {upstream_cell}
           <td>
@@ -695,11 +715,12 @@ def main():
         results = []
         for i, adv in enumerate(advisories, 1):
             print(f"  [{i}/{len(advisories)}] {adv['id']} ...", file=sys.stderr, end="\r")
-            details, err, multi_cve = fetch_tracker_details(adv["tracker_url"])
+            details, err, multi_cve, cves = fetch_tracker_details(adv["tracker_url"])
             if err:
                 print(f"\n  Warning: {adv['id']}: {err}", file=sys.stderr)
             adv["fixed_versions"] = details
             adv["multi_cve"] = multi_cve
+            adv["cves"] = cves
             results.append(adv)
             time.sleep(0.3)
 
