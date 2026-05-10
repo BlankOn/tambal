@@ -19,15 +19,51 @@ HASH_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "prev_load.
 # ── helpers ───────────────────────────────────────────────────────────────────
 
 def fetch(url):
-    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-    with urllib.request.urlopen(req) as r:
-        return r.read().decode("utf-8")
+    """Fetch URL with retry logic for transient failures (503, timeouts)."""
+    max_retries = 3
+    retry_delay = 30
+
+    for attempt in range(max_retries):
+        try:
+            req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+            with urllib.request.urlopen(req, timeout=30) as r:
+                return r.read().decode("utf-8")
+        except urllib.error.HTTPError as e:
+            if e.code == 503 and attempt < max_retries - 1:
+                print(f"HTTP 503: Backend unavailable. Retrying in {retry_delay}s... (attempt {attempt + 1}/{max_retries})", file=sys.stderr)
+                time.sleep(retry_delay)
+                continue
+            raise
+        except (urllib.error.URLError, TimeoutError) as e:
+            if attempt < max_retries - 1:
+                print(f"Connection error: {e}. Retrying in {retry_delay}s... (attempt {attempt + 1}/{max_retries})", file=sys.stderr)
+                time.sleep(retry_delay)
+                continue
+            raise
 
 
 def fetch_bytes(url):
-    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-    with urllib.request.urlopen(req) as r:
-        return r.read()
+    """Fetch URL bytes with retry logic for transient failures (503, timeouts)."""
+    max_retries = 3
+    retry_delay = 30
+
+    for attempt in range(max_retries):
+        try:
+            req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+            with urllib.request.urlopen(req, timeout=30) as r:
+                return r.read()
+        except urllib.error.HTTPError as e:
+            if e.code == 503 and attempt < max_retries - 1:
+                print(f"HTTP 503: Backend unavailable. Retrying in {retry_delay}s... (attempt {attempt + 1}/{max_retries})", file=sys.stderr)
+                time.sleep(retry_delay)
+                continue
+            raise
+        except (urllib.error.URLError, TimeoutError) as e:
+            if attempt < max_retries - 1:
+                print(f"Connection error: {e}. Retrying in {retry_delay}s... (attempt {attempt + 1}/{max_retries})", file=sys.stderr)
+                time.sleep(retry_delay)
+                continue
+            raise
 
 
 def fetch_text(url):
@@ -71,6 +107,27 @@ def save_hash(h):
         f.write(h)
 
 
+# ── CVE helpers ───────────────────────────────────────────────────────────────
+
+def extract_cves_from_tracker_page(html):
+    """Return deduplicated CVE IDs found in /tracker/CVE-* links on the page."""
+    cves = re.findall(r'/tracker/(CVE-\d{4}-\d+)', html)
+    return list(dict.fromkeys(cves))
+
+
+def extract_references_cves(html):
+    """Extract CVE IDs only from the References row of a DSA tracker page."""
+    m = re.search(
+        r'<b>\s*References\s*</b>\s*</td>\s*<td[^>]*>(.*?)</td>',
+        html, re.DOTALL | re.IGNORECASE
+    )
+    if not m:
+        return []
+    ref_cell = m.group(1)
+    cves = re.findall(r'/tracker/(CVE-\d{4}-\d+)', ref_cell)
+    return list(dict.fromkeys(cves))
+
+
 # ── fetch: main security page ─────────────────────────────────────────────────
 
 def fetch_advisories(since=None, no_cache=False):
@@ -82,7 +139,12 @@ def fetch_advisories(since=None, no_cache=False):
         print("Front page unchanged since last run. Loading cached advisories.", file=sys.stderr)
         try:
             with open(ADVISORIES_FILE) as f:
-                return json.load(f), True  # (advisories, from_cache)
+                cached = json.load(f)
+            # Schema check: older caches predate the multi_cve flag.
+            if cached and any("multi_cve" not in a for a in cached):
+                print("Cached advisories use an older schema; refetching.", file=sys.stderr)
+            else:
+                return cached, True  # (advisories, from_cache)
         except Exception:
             pass  # fall through and re-fetch
     save_hash(current_hash)
@@ -171,16 +233,12 @@ class TableParser(HTMLParser):
                 pass
 
 
-def fetch_tracker_details(url):
+def _parse_fixed_versions(html):
     """
-    Return list of {release, version, status} from the 'fixed versions' table.
+    Parse {release, version, status} entries from the 'fixed versions' table on
+    a Debian security tracker page (DSA or CVE — both share the same structure).
     Status is cross-referenced from the 'source packages' table on the same page.
     """
-    try:
-        html = fetch(url)
-    except Exception as e:
-        return [], str(e)
-
     marker_src = "information on source packages"
     marker_fix = "based on the following data on fixed versions"
 
@@ -205,11 +263,19 @@ def fetch_tracker_details(url):
     fix_rows = parser_fix.tables[0]
     src_rows = parser_src.tables[0] if parser_src.tables else []
 
+    # CVE pages sometimes group several releases in one row (e.g.
+    # "bullseye, bullseye (security)" or "forky, sid, trixie"). Split them so
+    # each individual release gets its own status entry.
     status_map = {}
     for row in src_rows:
-        release = row.get("Release", "").replace(" (security)", "").strip()
+        release_str = row.get("Release", "").strip()
         status = row.get("Status", "").strip()
-        if release and status:
+        if not release_str or not status:
+            continue
+        for release in release_str.split(","):
+            release = release.replace(" (security)", "").strip()
+            if not release:
+                continue
             if release not in status_map or status == "fixed":
                 status_map[release] = status
 
@@ -217,8 +283,10 @@ def fetch_tracker_details(url):
     for row in fix_rows:
         release = row.get("Release", "").strip()
         version = row.get("Fixed Version", "").strip()
-        if not release:
-            continue
+        if not release or release.startswith("("):
+            continue  # skip placeholders like "(unstable)"
+        if version.startswith("("):
+            continue  # skip placeholders like "(unfixed)"
         results.append({
             "release": release,
             "version": version,
@@ -226,6 +294,47 @@ def fetch_tracker_details(url):
         })
 
     return results, None
+
+
+def fetch_tracker_details(url):
+    """
+    Return (entries, error, multi_cve) where entries is a list of
+    {release, version, status} dicts.
+
+    Inspects the References row of the DSA page:
+      - multiple CVEs → caller marks the package as "Vulnerable - multiple CVEs"
+        (returns ([], None, True))
+      - single CVE → follows the CVE link and parses the (more complete)
+        'Vulnerable and fixed packages' table on the CVE page
+      - no CVE found → falls back to parsing the DSA page directly
+    """
+    try:
+        html = fetch(url)
+    except Exception as e:
+        return [], str(e), False
+
+    cves = extract_references_cves(html)
+
+    if len(cves) > 1:
+        return [], None, True
+
+    if len(cves) == 1:
+        cve_url = f"https://security-tracker.debian.org/tracker/{cves[0]}"
+        try:
+            cve_html = fetch(cve_url)
+        except Exception as e:
+            # Couldn't fetch the CVE page; fall back to the DSA page.
+            results, err = _parse_fixed_versions(html)
+            return results, err or str(e), False
+        results, err = _parse_fixed_versions(cve_html)
+        if err:
+            # CVE page didn't parse; fall back to the DSA page.
+            results, err2 = _parse_fixed_versions(html)
+            return results, err2, False
+        return results, None, False
+
+    results, err = _parse_fixed_versions(html)
+    return results, err, False
 
 
 # ── evaluate: repo discovery ──────────────────────────────────────────────────
@@ -347,6 +456,20 @@ def evaluate(advisories, package_index):
         if repo_ver is None:
             continue  # package not present in this repo
 
+        if adv.get("multi_cve"):
+            findings.append({
+                "advisory_id": adv["id"],
+                "date": adv["date"],
+                "package": pkg,
+                "repo_version": repo_ver,
+                "description": adv["description"],
+                "announce_url": adv["announce_url"],
+                "tracker_url": adv["tracker_url"],
+                "vulnerable_against": [],
+                "multi_cve": True,
+            })
+            continue
+
         fixed_versions = []
         is_vulnerable = False
         for fv in adv.get("fixed_versions", []):
@@ -390,34 +513,41 @@ def write_html_report(findings, html_dir, repo_url, upstream_repo=None):
 
     rows = []
     for f in findings:
-        # Find the latest fixed version across all releases to compare repo version against
-        all_fixed = [v["fixed_version"] for v in f["vulnerable_against"] if v["fixed_version"]]
-        latest_fixed = None
-        for fv in all_fixed:
-            if latest_fixed is None or version_lt(latest_fixed, fv):
-                latest_fixed = fv
-        repo_below_latest = latest_fixed is not None and version_lt(f["repo_version"], latest_fixed)
-        ver_class = "ver-below" if repo_below_latest else "ver-above"
+        if f.get("multi_cve"):
+            ver_class = "ver-below"
+            fixes = (
+                '<tr><td colspan="3"><strong>Vulnerable - multiple CVEs</strong>'
+                ' — see tracker for details.</td></tr>'
+            )
+        else:
+            # Find the latest fixed version across all releases to compare repo version against
+            all_fixed = [v["fixed_version"] for v in f["vulnerable_against"] if v["fixed_version"]]
+            latest_fixed = None
+            for fv in all_fixed:
+                if latest_fixed is None or version_lt(latest_fixed, fv):
+                    latest_fixed = fv
+            repo_below_latest = latest_fixed is not None and version_lt(f["repo_version"], latest_fixed)
+            ver_class = "ver-below" if repo_below_latest else "ver-above"
 
-        import functools
-        def _cmp_ver(a, b):
-            if version_lt(a["fixed_version"], b["fixed_version"]):
-                return 1   # a < b → a comes after b (descending)
-            if version_lt(b["fixed_version"], a["fixed_version"]):
-                return -1  # b < a → a comes before b
-            return 0
-        sorted_versions = sorted(
-            f["vulnerable_against"],
-            key=functools.cmp_to_key(_cmp_ver),
-        )
-        fixes = "".join(
-            f'<tr>'
-            f'<td>{e(v["release"])}</td>'
-            f'<td>{e(v["fixed_version"])}</td>'
-            f'<td>{e(v["status"])}</td>'
-            f'</tr>'
-            for v in sorted_versions
-        )
+            import functools
+            def _cmp_ver(a, b):
+                if version_lt(a["fixed_version"], b["fixed_version"]):
+                    return 1   # a < b → a comes after b (descending)
+                if version_lt(b["fixed_version"], a["fixed_version"]):
+                    return -1  # b < a → a comes before b
+                return 0
+            sorted_versions = sorted(
+                f["vulnerable_against"],
+                key=functools.cmp_to_key(_cmp_ver),
+            )
+            fixes = "".join(
+                f'<tr>'
+                f'<td>{e(v["release"])}</td>'
+                f'<td>{e(v["fixed_version"])}</td>'
+                f'<td>{e(v["status"])}</td>'
+                f'</tr>'
+                for v in sorted_versions
+            )
         upstream_ver = f.get("upstream_version")
         upstream_cell = (
             f'<td>{e(upstream_ver)}</td>' if upstream_ver is not None else ""
@@ -542,10 +672,11 @@ def main():
         results = []
         for i, adv in enumerate(advisories, 1):
             print(f"  [{i}/{len(advisories)}] {adv['id']} ...", file=sys.stderr, end="\r")
-            details, err = fetch_tracker_details(adv["tracker_url"])
+            details, err, multi_cve = fetch_tracker_details(adv["tracker_url"])
             if err:
                 print(f"\n  Warning: {adv['id']}: {err}", file=sys.stderr)
             adv["fixed_versions"] = details
+            adv["multi_cve"] = multi_cve
             results.append(adv)
             time.sleep(0.3)
 
@@ -579,8 +710,11 @@ def main():
     for f in findings:
         print(f"[{f['date']}] {f['advisory_id']}  {f['package']}")
         print(f"  Our version : {f['repo_version']}")
-        for v in f["vulnerable_against"]:
-            print(f"  Below fix    : {v['fixed_version']}  (for {v['release']}, status: {v['status']})")
+        if f.get("multi_cve"):
+            print(f"  Status       : Vulnerable - multiple CVEs")
+        else:
+            for v in f["vulnerable_against"]:
+                print(f"  Below fix    : {v['fixed_version']}  (for {v['release']}, status: {v['status']})")
         print(f"  Description  : {f['description']}")
         print(f"  Announce     : {f['announce_url']}")
         print()
