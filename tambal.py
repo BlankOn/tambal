@@ -676,10 +676,17 @@ def write_html_report(findings, html_dir, repo_url, upstream_repo=None):
             repo_below_latest = latest_fixed is not None and version_lt(f["repo_version"], latest_fixed)
             ver_class = "ver-below" if repo_below_latest else "ver-above"
             fixes = _entries_to_rows(f["vulnerable_against"])
-        upstream_ver = f.get("upstream_version")
-        upstream_cell = (
-            f'<td>{e(upstream_ver)}</td>' if upstream_ver is not None else ""
-        )
+        # Extract sid version from the CVE table data
+        sid_entries = [v for v in f.get("vulnerable_against", []) if v.get("release") == "sid"]
+        if sid_entries:
+            best_sid = sid_entries[0]
+            for s in sid_entries[1:]:
+                if version_lt(best_sid["fixed_version"], s["fixed_version"]):
+                    best_sid = s
+            sid_color = "ver-above" if best_sid["status"] == "fixed" else "ver-below"
+            sid_cell = f'<td class="{sid_color}">{e(best_sid["fixed_version"])}</td>'
+        else:
+            sid_cell = '<td style="color:#999;">—</td>'
 
         # Build CVE links
         cves = f.get("cves", [])
@@ -705,7 +712,7 @@ def write_html_report(findings, html_dir, repo_url, upstream_repo=None):
           <td>{e(f['package'])}</td>
           <td>{advisory_cell}</td>
           <td class="{ver_class}">{e(f['repo_version'])}</td>
-          {upstream_cell}
+          {sid_cell}
           <td>
             <table class="inner">
               <tr><th>Release</th><th>Version</th><th>Status</th></tr>
@@ -757,7 +764,7 @@ def write_html_report(findings, html_dir, repo_url, upstream_repo=None):
         <th>Package</th>
         <th>Advisory</th>
         <th>Our version</th>
-        {"<th>Upstream version (Sid)</th>" if upstream_repo else ""}
+        <th>Upstream version (Sid)</th>
         <th>Fixed version in stable releases</th>
       </tr>
     </thead>
