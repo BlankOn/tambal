@@ -338,17 +338,17 @@ def fetch_tracker_details(url, source_pkg=None):
     Return (entries, error, multi_cve, cves, cve_versions) where:
       - entries: flat list of {release, version, status} (no-CVE fallback only)
       - error: error string or None
-      - multi_cve: True when >= 6 CVEs (too many to track individually)
+      - multi_cve: True when >= 11 CVEs (too many to track individually)
       - cves: list of CVE IDs found in References
-      - cve_versions: dict {cve_id: [entries]} for 1-5 CVE advisories, else {}
+      - cve_versions: dict {cve_id: [entries]} for 1-10 CVE advisories, else {}
 
     When source_pkg is provided, only entries for that source package are kept
     from each CVE page (filters out unrelated packages sharing the same CVE).
 
     Behaviour by CVE count:
-      0 CVEs  → parse DSA page directly; cve_versions = {}
-      1-5 CVEs → fetch each CVE page; cve_versions = {cve: entries, ...}
-      ≥ 6 CVEs → multi_cve = True; cve_versions = {}
+      0 CVEs   → parse DSA page directly; cve_versions = {}
+      1-10 CVEs → fetch each CVE page; cve_versions = {cve: entries, ...}
+      ≥ 11 CVEs → multi_cve = True; cve_versions = {}
     """
     try:
         html = fetch(url)
@@ -357,7 +357,7 @@ def fetch_tracker_details(url, source_pkg=None):
 
     cves = extract_references_cves(html)
 
-    if len(cves) >= 6:
+    if len(cves) >= 11:
         return [], None, True, cves, {}
 
     if len(cves) >= 1:
@@ -644,7 +644,7 @@ def write_html_report(findings, html_dir, repo_url, upstream_repo=None):
         if f.get("multi_cve"):
             ver_class = "ver-below"
             fixes = (
-                '<tr><td colspan="3"><strong>Vulnerable - multiple CVEs (≥ 6)</strong>'
+                '<tr><td colspan="3"><strong>Vulnerable - multiple CVEs (≥ 11)</strong>'
                 ' — see tracker for details.</td></tr>'
             )
         elif f.get("cve_versions") and len(f["cve_versions"]) > 1:
