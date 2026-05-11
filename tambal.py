@@ -233,11 +233,14 @@ class TableParser(HTMLParser):
                 pass
 
 
-def _parse_fixed_versions(html):
+def _parse_fixed_versions(html, source_pkg=None):
     """
     Parse {release, version, status} entries from the 'fixed versions' table on
     a Debian security tracker page (DSA or CVE — both share the same structure).
     Status is cross-referenced from the 'source packages' table on the same page.
+
+    If source_pkg is given, only entries whose Package column matches are returned
+    and the status_map is built only from that package's rows.
     """
     marker_src = "information on source packages"
     marker_fix = "based on the following data on fixed versions"
@@ -263,18 +266,27 @@ def _parse_fixed_versions(html):
     fix_rows = parser_fix.tables[0]
     src_rows = parser_src.tables[0] if parser_src.tables else []
 
-    # CVE pages sometimes group several releases in one row (e.g.
-    # "bullseye, bullseye (security)" or "forky, sid, trixie"). Split them so
-    # each individual release gets its own status entry.
+    # Build status_map from the source packages table.
+    # The table uses continuation rows (empty "Source Package" cell) for all
+    # releases after the first in each group, so we track current_pkg as we go.
+    # When source_pkg is given, only include rows belonging to that package.
     status_map = {}
+    current_pkg = None
     for row in src_rows:
+        sp_cell = row.get("Source Package", "").strip()
+        if sp_cell:
+            # Strip trailing suffixes like " (PTS)"
+            current_pkg = re.sub(r'\s*\(.*?\)\s*$', '', sp_cell).strip()
+
+        if source_pkg and current_pkg != source_pkg:
+            continue
+
         release_str = row.get("Release", "").strip()
         status = row.get("Status", "").strip()
         if not release_str or not status:
             continue
         for release in release_str.split(","):
             release = release.replace(" (security)", "").strip()
-            # Map "(unstable)" to "sid" for consistency
             if release == "(unstable)":
                 release = "sid"
             if not release:
@@ -286,40 +298,42 @@ def _parse_fixed_versions(html):
     for row in fix_rows:
         release = row.get("Release", "").strip()
         version = row.get("Fixed Version", "").strip()
-        source_pkg = row.get("Package", "").strip()
+        row_pkg = row.get("Package", "").strip()
 
-        # Map "(unstable)" to "sid" for consistency
+        if source_pkg and row_pkg and row_pkg != source_pkg:
+            continue  # skip other packages
+
         if release == "(unstable)":
             release = "sid"
         elif not release or release.startswith("("):
-            continue  # skip other placeholders
+            continue
 
         if version.startswith("("):
-            continue  # skip placeholders like "(unfixed)"
+            continue
 
         entry = {
             "release": release,
             "version": version,
             "status": status_map.get(release, "fixed"),
         }
-        if source_pkg:
-            entry["source_pkg"] = source_pkg
+        if row_pkg:
+            entry["source_pkg"] = row_pkg
         results.append(entry)
 
     return results, None
 
 
-def _fetch_cve_versions(cve):
+def _fetch_cve_versions(cve, source_pkg=None):
     """Fetch and parse fixed versions for a single CVE ID. Returns (entries, error)."""
     url = f"https://security-tracker.debian.org/tracker/{cve}"
     try:
         html = fetch(url)
     except Exception as e:
         return [], str(e)
-    return _parse_fixed_versions(html)
+    return _parse_fixed_versions(html, source_pkg=source_pkg)
 
 
-def fetch_tracker_details(url):
+def fetch_tracker_details(url, source_pkg=None):
     """
     Return (entries, error, multi_cve, cves, cve_versions) where:
       - entries: flat list of {release, version, status} (no-CVE fallback only)
@@ -327,6 +341,9 @@ def fetch_tracker_details(url):
       - multi_cve: True when >= 6 CVEs (too many to track individually)
       - cves: list of CVE IDs found in References
       - cve_versions: dict {cve_id: [entries]} for 1-5 CVE advisories, else {}
+
+    When source_pkg is provided, only entries for that source package are kept
+    from each CVE page (filters out unrelated packages sharing the same CVE).
 
     Behaviour by CVE count:
       0 CVEs  → parse DSA page directly; cve_versions = {}
@@ -347,7 +364,7 @@ def fetch_tracker_details(url):
         cve_versions = {}
         errors = []
         for cve in cves:
-            entries, err = _fetch_cve_versions(cve)
+            entries, err = _fetch_cve_versions(cve, source_pkg=source_pkg)
             if err:
                 errors.append(f"{cve}: {err}")
             else:
@@ -357,7 +374,7 @@ def fetch_tracker_details(url):
         return [], err_msg, False, cves, cve_versions
 
     # No CVEs — fall back to parsing the DSA page directly.
-    results, err = _parse_fixed_versions(html)
+    results, err = _parse_fixed_versions(html, source_pkg=source_pkg)
     return results, err, False, cves, {}
 
 
@@ -801,7 +818,9 @@ def main():
         results = []
         for i, adv in enumerate(advisories, 1):
             print(f"  [{i}/{len(advisories)}] {adv['id']} ...", file=sys.stderr, end="\r")
-            details, err, multi_cve, cves, cve_versions = fetch_tracker_details(adv["tracker_url"])
+            details, err, multi_cve, cves, cve_versions = fetch_tracker_details(
+                adv["tracker_url"], source_pkg=adv["package"]
+            )
             if err:
                 print(f"\n  Warning: {adv['id']}: {err}", file=sys.stderr)
             adv["fixed_versions"] = details
