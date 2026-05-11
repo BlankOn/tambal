@@ -683,7 +683,8 @@ def write_html_report(findings, html_dir, repo_url, upstream_repo=None):
             for s in sid_entries[1:]:
                 if version_lt(best_sid["fixed_version"], s["fixed_version"]):
                     best_sid = s
-            sid_color = "ver-above" if best_sid["status"] == "fixed" else "ver-below"
+            any_not_fixed = any(s["status"] != "fixed" for s in sid_entries)
+            sid_color = "ver-below" if any_not_fixed else "ver-above"
             sid_cell = f'<td class="{sid_color}">{e(best_sid["fixed_version"])}</td>'
         else:
             sid_cell = '<td style="color:#999;">—</td>'
