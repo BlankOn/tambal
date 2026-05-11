@@ -3,6 +3,7 @@ import gzip
 import hashlib
 import json
 import os
+import random
 import re
 import subprocess
 import sys
@@ -369,7 +370,7 @@ def fetch_tracker_details(url, source_pkg=None):
                 errors.append(f"{cve}: {err}")
             else:
                 cve_versions[cve] = entries
-            time.sleep(0.1)
+            time.sleep(random.uniform(0.5, 1.5))
         err_msg = "; ".join(errors) if errors else None
         return [], err_msg, False, cves, cve_versions
 
@@ -836,7 +837,7 @@ def main():
             adv["cves"] = cves
             adv["cve_versions"] = cve_versions
             results.append(adv)
-            time.sleep(0.3)
+            time.sleep(random.uniform(1.0, 3.0))
 
         with open(output, "w") as f:
             json.dump(results, f, indent=2)
