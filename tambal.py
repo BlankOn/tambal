@@ -271,8 +271,15 @@ def _parse_fixed_versions(html, source_pkg=None):
     # The table uses continuation rows (empty "Source Package" cell) for all
     # releases after the first in each group, so we track current_pkg as we go.
     # When source_pkg is given, only include rows belonging to that package.
+    #
+    # A release can appear twice — once for the base suite (e.g. "trixie") and
+    # once for the security suite ("trixie (security)"). The tracker considers
+    # the release vulnerable whenever the base suite still ships an old version,
+    # even if the security suite has the fix. So a "vulnerable"/"unfixed" status
+    # for a release must win over a "fixed" status from another row.
     status_map = {}
     current_pkg = None
+    vulnerable_statuses = {"vulnerable", "unfixed"}
     for row in src_rows:
         sp_cell = row.get("Source Package", "").strip()
         if sp_cell:
@@ -292,7 +299,10 @@ def _parse_fixed_versions(html, source_pkg=None):
                 release = "sid"
             if not release:
                 continue
-            if release not in status_map or status == "fixed":
+            existing = status_map.get(release)
+            if existing is None:
+                status_map[release] = status
+            elif existing not in vulnerable_statuses and status in vulnerable_statuses:
                 status_map[release] = status
 
     results = []
