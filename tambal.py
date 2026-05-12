@@ -587,7 +587,7 @@ def evaluate(advisories, package_index):
 def write_html_report(findings, html_dir, repo_url, upstream_repo=None):
     import html as _html
 
-    generated_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    generated_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S %Z") or datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S %z")
 
     def e(s):
         return _html.escape(str(s))
