@@ -131,8 +131,13 @@ def extract_references_cves(html):
 
 # ── fetch: main security page ─────────────────────────────────────────────────
 
+SECURITY_PAGE_URL = "https://www.debian.org/security/"
+UPSTREAM_URL = SECURITY_PAGE_URL + "#DSAS"
+SOURCE_URL = "https://github.com/blankon/tambal"
+
+
 def fetch_advisories(since=None, no_cache=False):
-    html = fetch("https://www.debian.org/security/")
+    html = fetch(SECURITY_PAGE_URL)
 
     current_hash = page_hash(html)
     prev_hash = load_prev_hash()
@@ -732,6 +737,11 @@ PAGE_STYLE = """
     .failures .note { color: var(--muted); font-size: 0.88rem; margin: 0 0 0.75rem; }
     .failures .url { word-break: break-all; }
     .failures .err { color: var(--bad); }
+    footer {
+      margin-top: 2.5rem; padding-top: 1rem;
+      border-top: 1px solid var(--border);
+      color: var(--muted); font-size: 0.88rem; overflow-wrap: anywhere;
+    }
 
     @media (max-width: 860px) {
       table.report, table.report > tbody, table.report > tbody > tr,
@@ -781,7 +791,7 @@ NAV_HTML = """
         <ul>
           <li><a href="https://blankonlinux.id/en/team">Team</a></li>
           <li><a href="https://irgsh.blankonlinux.id/">IRGSH</a></li>
-          <li><a href="https://packages.blankonlinux.id/" target="_blank" rel="noopener noreferrer">Packages</a></li>
+          <li><a href="https://packages.blankonlinux.id/">Packages</a></li>
           <li><a href="https://security.blankonlinux.id/" target="_blank" rel="noopener noreferrer">Security</a></li>
           <li><a href="https://jahitan.blankonlinux.id/" target="_blank" rel="noopener noreferrer">Jahitan<svg class="ext" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><path d="M15 3h6v6"/><path d="M10 14 21 3"/></svg></a></li>
           <li><a href="https://arsip.blankonlinux.id/" target="_blank" rel="noopener noreferrer">Arsip<svg class="ext" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><path d="M15 3h6v6"/><path d="M10 14 21 3"/></svg></a></li>
@@ -1053,6 +1063,7 @@ def write_html_report(findings, html_dir, repo_url, upstream_repo=None, failures
   <h1>BlankOn Linux Security Report</h1>
   <div class="meta">
     Repository: <a href="{e(repo_url)}" target="_blank">{e(repo_url)}</a>
+    &nbsp;|&nbsp; Upstream: <a href="{e(UPSTREAM_URL)}" target="_blank">{e(UPSTREAM_URL)}</a>
     &nbsp;|&nbsp; Generated: {e(generated_at)}
   </div>
   <div class="summary {"bad" if count else "ok"}">{e(summary)}</div>
@@ -1073,6 +1084,9 @@ def write_html_report(findings, html_dir, repo_url, upstream_repo=None, failures
     </tbody>
   </table>"""}
   {failures_html}
+  <footer>
+    Source code: <a href="{e(SOURCE_URL)}" target="_blank">{e(SOURCE_URL)}</a>
+  </footer>
 </main>
 <script>{NAV_SCRIPT}</script>
 </body>
