@@ -596,7 +596,12 @@ PAGE_STYLE = """
       --link: #1a73e8;
       --ok: #27ae60;
       --bad: #c0392b;
-      --nav-bg: rgba(255, 255, 255, 0.8);
+      --nav-bg: rgba(245, 245, 245, 0.8);
+      --nav-solid: #f5f5f5;
+      --nav-border: rgba(204, 204, 204, 0.5);
+      --nav-fg: #737373;
+      --nav-fg-hover: #0a0a0a;
+      --nav-hover-bg: rgba(209, 209, 209, 0.5);
     }
     @media (prefers-color-scheme: dark) {
       :root {
@@ -610,7 +615,12 @@ PAGE_STYLE = """
         --link: #6ea8fe;
         --ok: #4ade80;
         --bad: #f87171;
-        --nav-bg: rgba(9, 9, 11, 0.8);
+        --nav-bg: rgba(18, 18, 18, 0.8);
+        --nav-solid: #121212;
+        --nav-border: rgba(102, 102, 102, 0.2);
+        --nav-fg: rgba(179, 179, 179, 0.8);
+        --nav-fg-hover: #ebebeb;
+        --nav-hover-bg: rgba(104, 104, 104, 0.3);
       }
     }
     * { box-sizing: border-box; }
@@ -629,16 +639,16 @@ PAGE_STYLE = """
     .nav {
       position: sticky; top: 0; z-index: 50;
       background: var(--nav-bg);
-      backdrop-filter: blur(8px);
-      -webkit-backdrop-filter: blur(8px);
-      border-bottom: 1px solid var(--border);
+      backdrop-filter: blur(16px);
+      -webkit-backdrop-filter: blur(16px);
+      border-bottom: 1px solid var(--nav-border);
     }
     .nav-inner {
       max-width: 1400px; margin: 0 auto;
       display: flex; align-items: center; gap: 1rem;
       padding: 0 1rem; height: 56px;
     }
-    .nav-logo { display: inline-flex; align-items: center; margin-right: auto; }
+    .nav-logo { display: inline-flex; align-items: center; }
     .nav-logo img { height: 24px; width: auto; display: block; }
     .nav-logo img.dark-only { display: none; }
     @media (prefers-color-scheme: dark) {
@@ -647,32 +657,33 @@ PAGE_STYLE = """
     }
     .nav-toggle {
       display: none; background: none; border: 0; cursor: pointer;
-      color: var(--muted); padding: 0.5rem; margin-right: -0.5rem;
+      color: var(--nav-fg); padding: 0.5rem; margin: 0 -0.5rem 0 auto;
     }
     .nav-links {
       display: flex; align-items: center; gap: 0.25rem;
+      margin-right: auto;
       font-size: 0.875rem;
     }
     .nav-links a, .nav-links button {
       display: inline-flex; align-items: center; gap: 0.375rem;
       padding: 0.5rem; border: 0; background: none; cursor: pointer;
-      font: inherit; color: var(--muted); text-decoration: none;
+      font: inherit; color: var(--nav-fg); text-decoration: none;
       transition: color 0.15s;
     }
-    .nav-links a:hover, .nav-links button:hover { color: var(--fg); }
+    .nav-links a:hover, .nav-links button:hover { color: var(--nav-fg-hover); }
     .nav-links .ext { width: 14px; height: 14px; opacity: 0.7; flex-shrink: 0; }
     .nav-drop { position: relative; }
     .nav-drop > ul {
       list-style: none; margin: 0; padding: 0.25rem 0;
       min-width: 170px;
-      position: absolute; right: 0; top: 100%; margin-top: 0.25rem;
-      background: var(--bg); border: 1px solid var(--border);
+      position: absolute; left: 0; top: 100%;
+      background: var(--nav-solid); border: 1px solid var(--nav-border);
       border-radius: 0.375rem; box-shadow: 0 4px 12px rgba(0, 0, 0, 0.12);
       visibility: hidden; opacity: 0; transition: opacity 0.15s;
     }
-    .nav-drop.open > ul, .nav-drop:hover > ul { visibility: visible; opacity: 1; }
+    .nav-drop.open > ul { visibility: visible; opacity: 1; }
     .nav-drop a { display: flex; padding: 0.5rem 1rem; width: 100%; }
-    .nav-drop a:hover { background: var(--subtle); }
+    .nav-drop a:hover { background: var(--nav-hover-bg); }
     .nav-caret { width: 12px; height: 12px; transition: transform 0.15s; }
     .nav-drop.open .nav-caret { transform: rotate(180deg); }
 
@@ -681,7 +692,7 @@ PAGE_STYLE = """
       .nav-links {
         display: none; position: absolute; left: 0; right: 0; top: 56px;
         flex-direction: column; align-items: stretch; gap: 0;
-        background: var(--bg); border-bottom: 1px solid var(--border);
+        background: var(--nav-solid); border-bottom: 1px solid var(--nav-border);
         padding: 0.5rem 1rem 1rem;
       }
       .nav-links.open { display: flex; }
@@ -691,7 +702,6 @@ PAGE_STYLE = """
         border: 0; box-shadow: none; background: none; margin: 0;
         min-width: 0; display: none;
       }
-      .nav-drop:hover > ul { display: none; }
       .nav-drop.open > ul { display: block; }
       .nav-drop a { padding: 0.625rem 0 0.625rem 1rem; }
       .nav-drop a:hover { background: none; }
@@ -746,9 +756,9 @@ PAGE_STYLE = """
 NAV_HTML = """
 <header class="nav">
   <div class="nav-inner">
-    <a class="nav-logo" href="https://blankon.id/en">
-      <img class="light-only" src="https://blankon.id/logo-black.png" alt="BlankOn" width="796" height="189">
-      <img class="dark-only" src="https://blankon.id/logo-white.png" alt="BlankOn" width="796" height="189">
+    <a class="nav-logo" href="https://blankonlinux.id/en">
+      <img class="light-only" src="https://blankonlinux.id/logo-black.png" alt="BlankOn" width="796" height="189">
+      <img class="dark-only" src="https://blankonlinux.id/logo-white.png" alt="BlankOn" width="796" height="189">
     </a>
     <button class="nav-toggle" type="button" aria-label="Menu" aria-expanded="false" aria-controls="nav-links">
       <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -756,15 +766,15 @@ NAV_HTML = """
       </svg>
     </button>
     <nav class="nav-links" id="nav-links">
-      <a href="https://blankon.id/en/download">Download</a>
-      <a href="https://blankon.id/en/wiki/">Wiki</a>
+      <a href="https://blankonlinux.id/en/download">Download</a>
+      <a href="https://blankonlinux.id/en/wiki/">Wiki</a>
       <div class="nav-drop">
         <button type="button" aria-expanded="false" aria-haspopup="menu">
           Development
           <svg class="nav-caret" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 9l6 6 6-6"/></svg>
         </button>
         <ul>
-          <li><a href="https://blankon.id/en/team">Team</a></li>
+          <li><a href="https://blankonlinux.id/en/team">Team</a></li>
           <li><a href="https://irgsh.blankonlinux.id/">IRGSH</a></li>
           <li><a href="https://packages.blankonlinux.id/" target="_blank" rel="noopener noreferrer">Packages</a></li>
           <li><a href="https://security.blankonlinux.id/" target="_blank" rel="noopener noreferrer">Security</a></li>
@@ -793,21 +803,40 @@ NAV_SCRIPT = """
     // Hover opens the dropdown on pointer devices; touch devices tap it open.
     var drop = document.querySelector('.nav-drop');
     var dropBtn = drop.querySelector('button');
+    var canHover = function () { return window.matchMedia('(hover: hover)').matches; };
+    var closeTimer = null;
+
+    function setDrop(open) {
+      drop.classList.toggle('open', open);
+      dropBtn.setAttribute('aria-expanded', String(open));
+    }
+    // Closing is delayed so the cursor can wander off the menu and back
+    // without the panel vanishing under it.
+    drop.addEventListener('mouseenter', function () {
+      clearTimeout(closeTimer);
+      if (canHover()) setDrop(true);
+    });
+    drop.addEventListener('mouseleave', function () {
+      if (!canHover()) return;
+      clearTimeout(closeTimer);
+      closeTimer = setTimeout(function () { setDrop(false); }, 100);
+    });
+
     dropBtn.addEventListener('click', function (event) {
       event.stopPropagation();
-      var open = drop.classList.toggle('open');
-      dropBtn.setAttribute('aria-expanded', String(open));
+      clearTimeout(closeTimer);
+      setDrop(canHover() ? true : !drop.classList.contains('open'));
     });
     document.addEventListener('click', function (event) {
       if (!drop.contains(event.target)) {
-        drop.classList.remove('open');
-        dropBtn.setAttribute('aria-expanded', 'false');
+        clearTimeout(closeTimer);
+        setDrop(false);
       }
     });
     document.addEventListener('keydown', function (event) {
       if (event.key === 'Escape') {
-        drop.classList.remove('open');
-        dropBtn.setAttribute('aria-expanded', 'false');
+        clearTimeout(closeTimer);
+        setDrop(false);
         links.classList.remove('open');
         toggle.setAttribute('aria-expanded', 'false');
       }
