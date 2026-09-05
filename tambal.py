@@ -584,6 +584,238 @@ def evaluate(advisories, package_index):
 
 # ── html report ───────────────────────────────────────────────────────────────
 
+PAGE_STYLE = """
+    :root {
+      --bg: #ffffff;
+      --fg: #18181b;
+      --muted: #71717a;
+      --border: #e4e4e7;
+      --subtle: #f4f4f5;
+      --subtle-2: #fafafa;
+      --accent: #f0f4ff;
+      --link: #1a73e8;
+      --ok: #27ae60;
+      --bad: #c0392b;
+      --nav-bg: rgba(255, 255, 255, 0.8);
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg: #09090b;
+        --fg: #fafafa;
+        --muted: #a1a1aa;
+        --border: #27272a;
+        --subtle: #18181b;
+        --subtle-2: #141417;
+        --accent: #1c2333;
+        --link: #6ea8fe;
+        --ok: #4ade80;
+        --bad: #f87171;
+        --nav-bg: rgba(9, 9, 11, 0.8);
+      }
+    }
+    * { box-sizing: border-box; }
+    html { -webkit-text-size-adjust: 100%; }
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--fg);
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Ubuntu,
+                   'Helvetica Neue', system-ui, sans-serif;
+      -webkit-font-smoothing: antialiased;
+    }
+    a { color: var(--link); }
+
+    /* ── top bar (ported from blankon.id) ─────────────────────────────── */
+    .nav {
+      position: sticky; top: 0; z-index: 50;
+      background: var(--nav-bg);
+      backdrop-filter: blur(8px);
+      -webkit-backdrop-filter: blur(8px);
+      border-bottom: 1px solid var(--border);
+    }
+    .nav-inner {
+      max-width: 1400px; margin: 0 auto;
+      display: flex; align-items: center; gap: 1rem;
+      padding: 0 1rem; height: 56px;
+    }
+    .nav-logo { display: inline-flex; align-items: center; margin-right: auto; }
+    .nav-logo img { height: 24px; width: auto; display: block; }
+    .nav-logo img.dark-only { display: none; }
+    @media (prefers-color-scheme: dark) {
+      .nav-logo img.light-only { display: none; }
+      .nav-logo img.dark-only { display: block; }
+    }
+    .nav-toggle {
+      display: none; background: none; border: 0; cursor: pointer;
+      color: var(--muted); padding: 0.5rem; margin-right: -0.5rem;
+    }
+    .nav-links {
+      display: flex; align-items: center; gap: 0.25rem;
+      font-size: 0.875rem;
+    }
+    .nav-links a, .nav-links button {
+      display: inline-flex; align-items: center; gap: 0.375rem;
+      padding: 0.5rem; border: 0; background: none; cursor: pointer;
+      font: inherit; color: var(--muted); text-decoration: none;
+      transition: color 0.15s;
+    }
+    .nav-links a:hover, .nav-links button:hover { color: var(--fg); }
+    .nav-links .ext { width: 14px; height: 14px; opacity: 0.7; flex-shrink: 0; }
+    .nav-drop { position: relative; }
+    .nav-drop > ul {
+      list-style: none; margin: 0; padding: 0.25rem 0;
+      min-width: 170px;
+      position: absolute; right: 0; top: 100%; margin-top: 0.25rem;
+      background: var(--bg); border: 1px solid var(--border);
+      border-radius: 0.375rem; box-shadow: 0 4px 12px rgba(0, 0, 0, 0.12);
+      visibility: hidden; opacity: 0; transition: opacity 0.15s;
+    }
+    .nav-drop.open > ul, .nav-drop:hover > ul { visibility: visible; opacity: 1; }
+    .nav-drop a { display: flex; padding: 0.5rem 1rem; width: 100%; }
+    .nav-drop a:hover { background: var(--subtle); }
+    .nav-caret { width: 12px; height: 12px; transition: transform 0.15s; }
+    .nav-drop.open .nav-caret { transform: rotate(180deg); }
+
+    @media (max-width: 860px) {
+      .nav-toggle { display: inline-flex; }
+      .nav-links {
+        display: none; position: absolute; left: 0; right: 0; top: 56px;
+        flex-direction: column; align-items: stretch; gap: 0;
+        background: var(--bg); border-bottom: 1px solid var(--border);
+        padding: 0.5rem 1rem 1rem;
+      }
+      .nav-links.open { display: flex; }
+      .nav-links a, .nav-links button { padding: 0.625rem 0; }
+      .nav-drop > ul {
+        position: static; visibility: visible; opacity: 1;
+        border: 0; box-shadow: none; background: none; margin: 0;
+        min-width: 0; display: none;
+      }
+      .nav-drop:hover > ul { display: none; }
+      .nav-drop.open > ul { display: block; }
+      .nav-drop a { padding: 0.625rem 0 0.625rem 1rem; }
+      .nav-drop a:hover { background: none; }
+    }
+
+    /* ── report ───────────────────────────────────────────────────────── */
+    main { max-width: 1400px; margin: 0 auto; padding: 1.5rem 1rem 3rem; }
+    h1 { font-size: 1.4rem; margin: 0 0 0.25rem; }
+    .meta { color: var(--muted); font-size: 0.9rem; margin-bottom: 1.5rem; overflow-wrap: anywhere; }
+    .summary { font-weight: bold; margin-bottom: 1rem; }
+    .summary.bad { color: var(--bad); }
+    .summary.ok { color: var(--ok); }
+    table { border-collapse: collapse; width: 100%; font-size: 0.88rem; }
+    th, td { border: 1px solid var(--border); padding: 0.45rem 0.65rem; vertical-align: top; }
+    th { background: var(--subtle); text-align: left; white-space: nowrap; }
+    tr:hover > td { background: var(--subtle-2); }
+    table.inner { font-size: 0.82rem; border: none; width: auto; }
+    table.inner th, table.inner td { border: 1px solid var(--border); padding: 0.25rem 0.5rem; }
+    table.inner th { background: var(--subtle-2); }
+    .grp { background: var(--subtle); font-style: italic; font-size: 0.82em; }
+    .cve-head { background: var(--accent); font-weight: bold; font-size: 0.82em; }
+    .cve-list { font-size: 0.85em; color: var(--muted); margin-top: 0.25rem; }
+    .none { color: var(--muted); }
+    .ver-above { color: var(--ok); font-weight: bold; }
+    .ver-below { color: var(--bad); font-weight: bold; }
+
+    @media (max-width: 860px) {
+      table.report, table.report > tbody, table.report > tbody > tr,
+      table.report > tbody > tr > td { display: block; width: 100%; }
+      table.report > thead { display: none; }
+      table.report { border: 0; }
+      table.report > tbody > tr {
+        border: 1px solid var(--border); border-radius: 0.5rem;
+        margin-bottom: 1rem; padding: 0.25rem 0.75rem; overflow: hidden;
+      }
+      table.report > tbody > tr:hover > td { background: none; }
+      table.report > tbody > tr > td {
+        border: 0; border-bottom: 1px solid var(--border);
+        padding: 0.55rem 0; overflow-wrap: anywhere;
+      }
+      table.report > tbody > tr > td:last-child { border-bottom: 0; }
+      table.report > tbody > tr > td::before {
+        content: attr(data-label);
+        display: block; font-size: 0.72rem; text-transform: uppercase;
+        letter-spacing: 0.04em; color: var(--muted); margin-bottom: 0.15rem;
+      }
+      table.inner { width: 100%; font-size: 0.78rem; }
+      table.inner th, table.inner td { white-space: normal; }
+    }
+"""
+
+NAV_HTML = """
+<header class="nav">
+  <div class="nav-inner">
+    <a class="nav-logo" href="https://blankon.id/en">
+      <img class="light-only" src="https://blankon.id/logo-black.png" alt="BlankOn" width="796" height="189">
+      <img class="dark-only" src="https://blankon.id/logo-white.png" alt="BlankOn" width="796" height="189">
+    </a>
+    <button class="nav-toggle" type="button" aria-label="Menu" aria-expanded="false" aria-controls="nav-links">
+      <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <path d="M4 6h16M4 12h16M4 18h16"/>
+      </svg>
+    </button>
+    <nav class="nav-links" id="nav-links">
+      <a href="https://blankon.id/en/download">Download</a>
+      <a href="https://blankon.id/en/wiki/">Wiki</a>
+      <div class="nav-drop">
+        <button type="button" aria-expanded="false" aria-haspopup="menu">
+          Development
+          <svg class="nav-caret" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 9l6 6 6-6"/></svg>
+        </button>
+        <ul>
+          <li><a href="https://blankon.id/en/team">Team</a></li>
+          <li><a href="https://irgsh.blankonlinux.id/">IRGSH</a></li>
+          <li><a href="https://packages.blankonlinux.id/" target="_blank" rel="noopener noreferrer">Packages</a></li>
+          <li><a href="https://security.blankonlinux.id/" target="_blank" rel="noopener noreferrer">Security</a></li>
+          <li><a href="https://jahitan.blankonlinux.id/" target="_blank" rel="noopener noreferrer">Jahitan<svg class="ext" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><path d="M15 3h6v6"/><path d="M10 14 21 3"/></svg></a></li>
+          <li><a href="https://arsip.blankonlinux.id/" target="_blank" rel="noopener noreferrer">Arsip<svg class="ext" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><path d="M15 3h6v6"/><path d="M10 14 21 3"/></svg></a></li>
+          <li><a href="https://arsip-dev.blankonlinux.id/" target="_blank" rel="noopener noreferrer">Arsip Dev<svg class="ext" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><path d="M15 3h6v6"/><path d="M10 14 21 3"/></svg></a></li>
+          <li><a href="https://github.com/blankon" target="_blank" rel="noopener noreferrer">Github<svg class="ext" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><path d="M15 3h6v6"/><path d="M10 14 21 3"/></svg></a></li>
+        </ul>
+      </div>
+      <a href="https://blankon.id/en/sponsorship" target="_blank" rel="noopener noreferrer">Sponsorship<svg class="ext" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><path d="M15 3h6v6"/><path d="M10 14 21 3"/></svg></a>
+      <a href="https://blankon.id/en/donate" target="_blank" rel="noopener noreferrer">Donate<svg class="ext" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><path d="M15 3h6v6"/><path d="M10 14 21 3"/></svg></a>
+    </nav>
+  </div>
+</header>
+"""
+
+NAV_SCRIPT = """
+  (function () {
+    var toggle = document.querySelector('.nav-toggle');
+    var links = document.getElementById('nav-links');
+    toggle.addEventListener('click', function () {
+      var open = links.classList.toggle('open');
+      toggle.setAttribute('aria-expanded', String(open));
+    });
+
+    // Hover opens the dropdown on pointer devices; touch devices tap it open.
+    var drop = document.querySelector('.nav-drop');
+    var dropBtn = drop.querySelector('button');
+    dropBtn.addEventListener('click', function (event) {
+      event.stopPropagation();
+      var open = drop.classList.toggle('open');
+      dropBtn.setAttribute('aria-expanded', String(open));
+    });
+    document.addEventListener('click', function (event) {
+      if (!drop.contains(event.target)) {
+        drop.classList.remove('open');
+        dropBtn.setAttribute('aria-expanded', 'false');
+      }
+    });
+    document.addEventListener('keydown', function (event) {
+      if (event.key === 'Escape') {
+        drop.classList.remove('open');
+        dropBtn.setAttribute('aria-expanded', 'false');
+        links.classList.remove('open');
+        toggle.setAttribute('aria-expanded', 'false');
+      }
+    });
+  })();
+"""
+
+
 def write_html_report(findings, html_dir, repo_url, upstream_repo=None):
     import html as _html
 
@@ -618,8 +850,7 @@ def write_html_report(findings, html_dir, repo_url, upstream_repo=None):
             html_rows = []
             for sp in pkgs:
                 html_rows.append(
-                    f'<tr><td colspan="3" style="background:#f5f5f5; font-style:italic; font-size:0.82em;">'
-                    f'{e(sp)}</td></tr>'
+                    f'<tr><td colspan="3" class="grp">{e(sp)}</td></tr>'
                 )
                 for v in _sort_entries(seen[sp]):
                     html_rows.append(
@@ -662,7 +893,7 @@ def write_html_report(findings, html_dir, repo_url, upstream_repo=None):
             for cve_id, entries in f["cve_versions"].items():
                 cve_url = f"https://security-tracker.debian.org/tracker/{e(cve_id)}"
                 header = (
-                    f'<tr><td colspan="3" style="background:#f0f4ff; font-weight:bold; font-size:0.82em;">'
+                    f'<tr><td colspan="3" class="cve-head">'
                     f'<a href="{cve_url}" target="_blank">{e(cve_id)}</a></td></tr>'
                 )
                 cve_blocks.append(header + _entries_to_rows(entries))
@@ -686,9 +917,12 @@ def write_html_report(findings, html_dir, repo_url, upstream_repo=None):
                     best_sid = s
             any_not_fixed = any(s["status"] != "fixed" for s in sid_entries)
             sid_color = "ver-below" if any_not_fixed else "ver-above"
-            sid_cell = f'<td class="{sid_color}">{e(best_sid["fixed_version"])}</td>'
+            sid_cell = (
+                f'<td class="{sid_color}" data-label="Upstream version (Sid)">'
+                f'{e(best_sid["fixed_version"])}</td>'
+            )
         else:
-            sid_cell = '<td style="color:#999;">—</td>'
+            sid_cell = '<td class="none" data-label="Upstream version (Sid)">—</td>'
 
         # Build CVE links
         cves = f.get("cves", [])
@@ -700,7 +934,7 @@ def write_html_report(findings, html_dir, repo_url, upstream_repo=None):
             advisory_cell = (
                 f'<div><a href="{e(f["announce_url"])}" target="_blank">{e(f["advisory_id"])}</a> | '
                 f'<a href="{e(f["tracker_url"])}" target="_blank">Tracker</a></div>'
-                f'<div style="font-size: 0.85em; color: #666; margin-top: 0.25rem;">CVE: {cve_links}</div>'
+                f'<div class="cve-list">CVE: {cve_links}</div>'
             )
         else:
             advisory_cell = (
@@ -710,12 +944,12 @@ def write_html_report(findings, html_dir, repo_url, upstream_repo=None):
 
         rows.append(f"""
         <tr>
-          <td>{e(f['date'])}</td>
-          <td>{e(f['package'])}</td>
-          <td>{advisory_cell}</td>
-          <td class="{ver_class}">{e(f['repo_version'])}</td>
+          <td data-label="Date">{e(f['date'])}</td>
+          <td data-label="Package">{e(f['package'])}</td>
+          <td data-label="Advisory">{advisory_cell}</td>
+          <td class="{ver_class}" data-label="Our version">{e(f['repo_version'])}</td>
           {sid_cell}
-          <td>
+          <td data-label="Fixed version in stable releases">
             <table class="inner">
               <tr><th>Release</th><th>Version</th><th>Status</th></tr>
               {fixes}
@@ -732,34 +966,21 @@ def write_html_report(findings, html_dir, repo_url, upstream_repo=None):
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
   <title>BlankOn Linux Security Report</title>
-  <style>
-    body {{ font-family: system-ui, sans-serif; margin: 2rem; color: #222; }}
-    h1 {{ font-size: 1.4rem; margin-bottom: 0.25rem; }}
-    .meta {{ color: #666; font-size: 0.9rem; margin-bottom: 1.5rem; }}
-    .summary {{ font-weight: bold; margin-bottom: 1rem;
-                color: {"#c0392b" if count else "#27ae60"}; }}
-    table {{ border-collapse: collapse; width: 100%; font-size: 0.88rem; }}
-    th, td {{ border: 1px solid #ddd; padding: 0.45rem 0.65rem; vertical-align: top; }}
-    th {{ background: #f4f4f4; text-align: left; white-space: nowrap; }}
-    tr:hover > td {{ background: #fafafa; }}
-    table.inner {{ font-size: 0.82rem; border: none; width: auto; }}
-    table.inner th, table.inner td {{ border: 1px solid #e0e0e0; padding: 0.25rem 0.5rem; }}
-    table.inner th {{ background: #f9f9f9; }}
-    .ver-above {{ color: #27ae60; font-weight: bold; }}
-    .ver-below {{ color: #c0392b; font-weight: bold; }}
-    a {{ color: #1a73e8; }}
-  </style>
+  <style>{PAGE_STYLE}</style>
 </head>
 <body>
+{NAV_HTML}
+<main>
   <h1>BlankOn Linux Security Report</h1>
   <div class="meta">
     Repository: <a href="{e(repo_url)}" target="_blank">{e(repo_url)}</a>
     &nbsp;|&nbsp; Generated: {e(generated_at)}
   </div>
-  <div class="summary">{e(summary)}</div>
+  <div class="summary {"bad" if count else "ok"}">{e(summary)}</div>
   {"" if not count else f"""
-  <table>
+  <table class="report">
     <thead>
       <tr>
         <th>Date</th>
@@ -774,6 +995,8 @@ def write_html_report(findings, html_dir, repo_url, upstream_repo=None):
       {rows_html}
     </tbody>
   </table>"""}
+</main>
+<script>{NAV_SCRIPT}</script>
 </body>
 </html>
 """
