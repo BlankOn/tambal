@@ -19,31 +19,21 @@ HASH_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "prev_load.
 
 # ── helpers ───────────────────────────────────────────────────────────────────
 
-def fetch(url):
-    """Fetch URL with retry logic for transient failures (503, timeouts)."""
-    max_retries = 3
-    retry_delay = 30
-
-    for attempt in range(max_retries):
-        try:
-            req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-            with urllib.request.urlopen(req, timeout=30) as r:
-                return r.read().decode("utf-8")
-        except urllib.error.HTTPError as e:
-            if e.code == 503 and attempt < max_retries - 1:
-                print(f"HTTP 503: Backend unavailable. Retrying in {retry_delay}s... (attempt {attempt + 1}/{max_retries})", file=sys.stderr)
-                time.sleep(retry_delay)
-                continue
-            raise
-        except (urllib.error.URLError, TimeoutError) as e:
-            if attempt < max_retries - 1:
-                print(f"Connection error: {e}. Retrying in {retry_delay}s... (attempt {attempt + 1}/{max_retries})", file=sys.stderr)
-                time.sleep(retry_delay)
-                continue
-            raise
+# Fetches that never succeeded, even after every retry. Collected here so the
+# generated report can say which data is missing instead of silently dropping it.
+FETCH_FAILURES = []
 
 
-def fetch_bytes(url):
+def record_fetch_failure(url, error, attempts):
+    FETCH_FAILURES.append({
+        "url": url,
+        "error": error,
+        "attempts": attempts,
+        "time": datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S %Z"),
+    })
+
+
+def _fetch_raw(url):
     """Fetch URL bytes with retry logic for transient failures (503, timeouts)."""
     max_retries = 3
     retry_delay = 30
@@ -58,13 +48,23 @@ def fetch_bytes(url):
                 print(f"HTTP 503: Backend unavailable. Retrying in {retry_delay}s... (attempt {attempt + 1}/{max_retries})", file=sys.stderr)
                 time.sleep(retry_delay)
                 continue
+            record_fetch_failure(url, f"HTTP {e.code} {e.reason}", attempt + 1)
             raise
         except (urllib.error.URLError, TimeoutError) as e:
             if attempt < max_retries - 1:
                 print(f"Connection error: {e}. Retrying in {retry_delay}s... (attempt {attempt + 1}/{max_retries})", file=sys.stderr)
                 time.sleep(retry_delay)
                 continue
+            record_fetch_failure(url, str(e), attempt + 1)
             raise
+
+
+def fetch(url):
+    return _fetch_raw(url).decode("utf-8")
+
+
+def fetch_bytes(url):
+    return _fetch_raw(url)
 
 
 def fetch_text(url):
@@ -727,6 +727,11 @@ PAGE_STYLE = """
     .none { color: var(--muted); }
     .ver-above { color: var(--ok); font-weight: bold; }
     .ver-below { color: var(--bad); font-weight: bold; }
+    .failures { margin-top: 2.5rem; }
+    .failures h2 { font-size: 1.05rem; margin: 0 0 0.25rem; }
+    .failures .note { color: var(--muted); font-size: 0.88rem; margin: 0 0 0.75rem; }
+    .failures .url { word-break: break-all; }
+    .failures .err { color: var(--bad); }
 
     @media (max-width: 860px) {
       table.report, table.report > tbody, table.report > tbody > tr,
@@ -845,7 +850,7 @@ NAV_SCRIPT = """
 """
 
 
-def write_html_report(findings, html_dir, repo_url, upstream_repo=None):
+def write_html_report(findings, html_dir, repo_url, upstream_repo=None, failures=None):
     import html as _html
 
     generated_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S %Z") or datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S %z")
@@ -990,6 +995,49 @@ def write_html_report(findings, html_dir, repo_url, upstream_repo=None):
     count = len(findings)
     summary = f"{count} potentially vulnerable package(s) found." if count else "No vulnerable packages found."
 
+    # Fetches that never came back, so the reader knows the table above may be
+    # missing advisories or versions.
+    seen_failures = {}
+    for fail in failures or []:
+        key = (fail["url"], fail["error"])
+        if key in seen_failures:
+            seen_failures[key]["occurrences"] += 1
+        else:
+            seen_failures[key] = dict(fail, occurrences=1)
+
+    fail_rows = []
+    for fail in seen_failures.values():
+        tries = f'{fail["attempts"]} attempt(s)'
+        if fail["occurrences"] > 1:
+            tries += f' × {fail["occurrences"]} run(s)'
+        fail_rows.append(
+            f'<tr>'
+            f'<td data-label="Time">{e(fail["time"])}</td>'
+            f'<td class="url" data-label="URL">'
+            f'<a href="{e(fail["url"])}" target="_blank">{e(fail["url"])}</a></td>'
+            f'<td data-label="Tried">{e(tries)}</td>'
+            f'<td class="err" data-label="Error">{e(fail["error"])}</td>'
+            f'</tr>'
+        )
+
+    if fail_rows:
+        failures_html = f"""
+  <section class="failures">
+    <h2>Failed fetches ({len(fail_rows)})</h2>
+    <p class="note">These pages could not be retrieved, even after retrying,
+       so the report above may be incomplete.</p>
+    <table class="report">
+      <thead>
+        <tr><th>Time</th><th>URL</th><th>Tried</th><th>Error</th></tr>
+      </thead>
+      <tbody>
+        {"".join(fail_rows)}
+      </tbody>
+    </table>
+  </section>"""
+    else:
+        failures_html = ""
+
     page = f"""<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -1024,6 +1072,7 @@ def write_html_report(findings, html_dir, repo_url, upstream_repo=None):
       {rows_html}
     </tbody>
   </table>"""}
+  {failures_html}
 </main>
 <script>{NAV_SCRIPT}</script>
 </body>
@@ -1110,10 +1159,17 @@ def main():
         for f in findings:
             f["upstream_version"] = upstream_index.get(f["package"])
 
+    if FETCH_FAILURES:
+        print(f"\n{len(FETCH_FAILURES)} fetch(es) failed after retries:", file=sys.stderr)
+        for fail in FETCH_FAILURES:
+            print(f"  {fail['url']} -> {fail['error']}", file=sys.stderr)
+        print("Report data may be incomplete.\n", file=sys.stderr)
+
     if not findings:
         print("No vulnerable packages found.", file=sys.stderr)
         if html_dir:
-            write_html_report(findings, html_dir, repo_url, upstream_repo=upstream_repo)
+            write_html_report(findings, html_dir, repo_url, upstream_repo=upstream_repo,
+                              failures=FETCH_FAILURES)
         sys.exit(0)
 
     print(f"Found {len(findings)} potentially vulnerable package(s):\n", file=sys.stderr)
@@ -1131,7 +1187,8 @@ def main():
         print()
 
     if html_dir:
-        write_html_report(findings, html_dir, repo_url, upstream_repo=upstream_repo)
+        write_html_report(findings, html_dir, repo_url, upstream_repo=upstream_repo,
+                          failures=FETCH_FAILURES)
 
 
 if __name__ == "__main__":
