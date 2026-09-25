@@ -1,23 +1,82 @@
 #!/usr/bin/env python3
+"""Tambal — BlankOn Linux security report.
+
+Find packages in the BlankOn repository that are still behind Debian's
+security fixes. Results are grouped per source package because a maintainer
+imports a *package*, not an advisory or a CVE.
+
+This rewrite replaces the old HTML-scraping approach with Debian's official,
+structured security-tracker JSON export, so it no longer scrapes
+security-tracker.debian.org (which rate-limits aggressive scrapers and breaks
+whenever the markup changes).
+
+Data sources:
+  * https://security-tracker.debian.org/tracker/data/json
+      (source package -> CVE -> per-release status + fixed version)
+  * the target repository's Sources.gz index
+
+Usage:
+  python3 tambal.py --repo=http://arsip-dev.blankonlinux.id/sinambung/ \
+                    --output=./advisories.json --html=./security-advisories
+"""
 import gzip
-import hashlib
 import json
 import os
-import random
 import re
+import shutil
 import subprocess
 import sys
 import time
+import urllib.error
 import urllib.request
 from datetime import datetime
-from html.parser import HTMLParser
-from io import BytesIO
 
-ADVISORIES_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "advisories.json")
-HASH_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "prev_load.hash")
+TRACKER_JSON_URL = "https://security-tracker.debian.org/tracker/data/json"
+TRACKER_CACHE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "tracker.json")
+SOURCE_URL = "https://github.com/blankon/tambal"
+TRACKER_URL = "https://security-tracker.debian.org/tracker/"
+DSA_URL = "https://www.debian.org/security/#DSAS"
+
+NVD_API_URL = "https://services.nvd.nist.gov/rest/json/cves/2.0"
+NVD_CACHE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "nvd-cache.json")
+
+
+def _load_env_file():
+    """Load KEY=VALUE pairs from a .env file next to the script, if present."""
+    env_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
+    if not os.path.exists(env_path):
+        return
+    with open(env_path) as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            k, v = line.split("=", 1)
+            os.environ.setdefault(k.strip(), v.strip().strip('"\''))
+
+
+_load_env_file()
+
+# Optional. Set NVD_API_KEY (environment or .env) to raise the rate limit
+# (5 req/30s keyless -> 50 req/30s with a key). Never hardcode it here.
+NVD_API_KEY = os.environ.get("NVD_API_KEY", "")
+
+# Debian security-tracker git repo (source of the DSA list, mapping DSA -> CVEs).
+SEC_TRACKER_REPO = "https://salsa.debian.org/security-tracker-team/security-tracker.git"
+SEC_TRACKER_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "sec-tracker")
+DSA_LIST_PATH = os.path.join(SEC_TRACKER_DIR, "data", "DSA", "list")
+
+# debian.org/security page lists each DSA with its mailing-list announcement URL.
+DSA_ANNOUNCE_URL = "https://www.debian.org/security/"
+DSA_ANNOUNCE_CACHE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "dsa-announce.json")
 
 
 # ── helpers ───────────────────────────────────────────────────────────────────
+
+# Cache for dpkg version comparisons: (a, b) -> bool, avoids repeated subprocess
+# calls when many CVEs share the same fixed version.
+_VERSION_CACHE = {}
+
 
 # Fetches that never succeeded, even after every retry. Collected here so the
 # generated report can say which data is missing instead of silently dropping it.
@@ -33,6 +92,16 @@ def record_fetch_failure(url, error, attempts):
     })
 
 
+def report_fetch_failures():
+    """Print a stderr summary of fetches that never succeeded."""
+    if not FETCH_FAILURES:
+        return
+    print(f"\n{len(FETCH_FAILURES)} fetch(es) failed after retries:", file=sys.stderr)
+    for fail in FETCH_FAILURES:
+        print(f"  - {fail['url']} ({fail['attempts']} attempt(s)): {fail['error']}",
+              file=sys.stderr)
+
+
 def _fetch_raw(url):
     """Fetch URL bytes with retry logic for transient failures (503, timeouts)."""
     max_retries = 3
@@ -41,26 +110,24 @@ def _fetch_raw(url):
     for attempt in range(max_retries):
         try:
             req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-            with urllib.request.urlopen(req, timeout=30) as r:
+            with urllib.request.urlopen(req, timeout=60) as r:
                 return r.read()
         except urllib.error.HTTPError as e:
             if e.code == 503 and attempt < max_retries - 1:
-                print(f"HTTP 503: Backend unavailable. Retrying in {retry_delay}s... (attempt {attempt + 1}/{max_retries})", file=sys.stderr)
+                print(f"HTTP 503: Backend unavailable. Retrying in {retry_delay}s... "
+                      f"(attempt {attempt + 1}/{max_retries})", file=sys.stderr)
                 time.sleep(retry_delay)
                 continue
             record_fetch_failure(url, f"HTTP {e.code} {e.reason}", attempt + 1)
             raise
         except (urllib.error.URLError, TimeoutError) as e:
             if attempt < max_retries - 1:
-                print(f"Connection error: {e}. Retrying in {retry_delay}s... (attempt {attempt + 1}/{max_retries})", file=sys.stderr)
+                print(f"Connection error: {e}. Retrying in {retry_delay}s... "
+                      f"(attempt {attempt + 1}/{max_retries})", file=sys.stderr)
                 time.sleep(retry_delay)
                 continue
             record_fetch_failure(url, str(e), attempt + 1)
             raise
-
-
-def fetch(url):
-    return _fetch_raw(url).decode("utf-8")
 
 
 def fetch_bytes(url):
@@ -68,329 +135,171 @@ def fetch_bytes(url):
 
 
 def fetch_text(url):
-    return fetch_bytes(url).decode("utf-8")
-
-
-def parse_date(s):
-    """Parse '01 Apr 2026' -> datetime.date"""
-    return datetime.strptime(s, "%d %b %Y").date()
-
-
-def format_date(d):
-    return d.strftime("%Y-%m-%d")
+    return _fetch_raw(url).decode("utf-8")
 
 
 def version_lt(v1, v2):
     """Return True if v1 < v2 using dpkg version comparison."""
+    key = (v1, v2)
+    if key in _VERSION_CACHE:
+        return _VERSION_CACHE[key]
     result = subprocess.run(
         ["dpkg", "--compare-versions", v1, "lt", v2],
         capture_output=True,
     )
-    return result.returncode == 0
+    out = result.returncode == 0
+    _VERSION_CACHE[key] = out
+    return out
 
 
-# ── front page fingerprint ────────────────────────────────────────────────────
+def _is_fresh(path, seconds):
+    """Return True if path exists and was modified within the last `seconds`."""
+    return os.path.exists(path) and (time.time() - os.path.getmtime(path) < seconds)
 
-def page_hash(html):
-    return hashlib.sha256(html.encode()).hexdigest()
+
+def max_version(versions):
+    """Return the highest version string (dpkg ordering) from an iterable."""
+    best = None
+    for v in versions:
+        if best is None or version_lt(best, v):
+            best = v
+    return best
 
 
-def load_prev_hash():
+# Severity: prefer the vendor rating embedded in the CVE description
+# (e.g. "(Chromium security severity: Critical)"), fall back to Debian's
+# per-release urgency (high/medium/low).
+SEVERITY_RANK = {"critical": 4, "high": 3, "medium": 2, "low": 1}
+
+
+def extract_severity(info):
+    """Return a severity label ('Critical'/'High'/'Medium'/'Low') or None."""
+    desc = info.get("description", "") or ""
+    m = re.search(r"severity:\s*(\w+)", desc)
+    if m:
+        s = m.group(1).lower()
+        if s in SEVERITY_RANK:
+            return s.capitalize()
+    best = None
+    for relinfo in info.get("releases", {}).values():
+        u = (relinfo.get("urgency") or "").lower()
+        if u in ("high", "medium", "low"):
+            if best is None or SEVERITY_RANK[u] > SEVERITY_RANK[best]:
+                best = u
+    return best.capitalize() if best else None
+
+
+def max_severity(sevs):
+    """Return the highest severity label from a list (or None)."""
+    best = None
+    for s in sevs:
+        if not s:
+            continue
+        r = SEVERITY_RANK.get(s.lower())
+        if r and (best is None or r > SEVERITY_RANK[best.lower()]):
+            best = s
+    return best
+
+
+# ── NVD enrichment ────────────────────────────────────────────────────────────
+
+def _nvd_delay():
+    # Respect the rolling rate limit: 5 req/30s keyless, 50 req/30s with a key.
+    # Sleep a little past the per-request average to stay safely under.
+    return 0.7 if NVD_API_KEY else 7.0
+
+
+def _load_nvd_cache():
     try:
-        with open(HASH_FILE) as f:
-            return f.read().strip()
-    except FileNotFoundError:
+        with open(NVD_CACHE) as f:
+            return json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {}
+
+
+def _save_nvd_cache(cache):
+    with open(NVD_CACHE, "w") as f:
+        json.dump(cache, f)
+
+
+def _fetch_nvd(cve_id, cache):
+    """Return {severity, published} for a CVE (or None), using/updating cache.
+
+    Only real CVE IDs are looked up. Failed / not-yet-in-NVD lookups are NOT
+    cached, so they get retried on the next run (NVD has a processing backlog).
+    """
+    if cve_id in cache:
+        return cache[cve_id]
+    if not re.match(r"^CVE-\d{4}-\d+$", cve_id):
+        return None
+    headers = {"User-Agent": "Mozilla/5.0"}
+    if NVD_API_KEY:
+        headers["apiKey"] = NVD_API_KEY
+    url = f"{NVD_API_URL}?cveId={cve_id}"
+    req = urllib.request.Request(url, headers=headers)
+    try:
+        with urllib.request.urlopen(req, timeout=30) as r:
+            data = json.loads(r.read().decode())
+    except Exception:
         return None
 
+    vulns = data.get("vulnerabilities", [])
+    if not vulns:
+        return None
 
-def save_hash(h):
-    with open(HASH_FILE, "w") as f:
-        f.write(h)
+    cve = vulns[0].get("cve", {})
+    sev = None
+    for mkey in ("cvssMetricV40", "cvssMetricV31", "cvssMetricV30", "cvssMetricV2"):
+        for entry in cve.get("metrics", {}).get(mkey, []):
+            bs = entry.get("cvssData", {}).get("baseSeverity")
+            if bs:
+                s = bs.upper()
+                if sev is None or SEVERITY_RANK.get(s.lower(), 0) > SEVERITY_RANK.get(sev.lower(), 0):
+                    sev = s
 
-
-# ── CVE helpers ───────────────────────────────────────────────────────────────
-
-def extract_cves_from_tracker_page(html):
-    """Return deduplicated CVE IDs found in /tracker/CVE-* links on the page."""
-    cves = re.findall(r'/tracker/(CVE-\d{4}-\d+)', html)
-    return list(dict.fromkeys(cves))
-
-
-def extract_references_cves(html):
-    """Extract CVE IDs only from the References row of a DSA tracker page."""
-    m = re.search(
-        r'<b>\s*References\s*</b>\s*</td>\s*<td[^>]*>(.*?)</td>',
-        html, re.DOTALL | re.IGNORECASE
-    )
-    if not m:
-        return []
-    ref_cell = m.group(1)
-    cves = re.findall(r'/tracker/(CVE-\d{4}-\d+)', ref_cell)
-    return list(dict.fromkeys(cves))
+    result = {"severity": sev, "published": cve.get("published")}
+    cache[cve_id] = result
+    time.sleep(_nvd_delay())
+    return result
 
 
-# ── fetch: main security page ─────────────────────────────────────────────────
+def enrich_nvd(findings, no_cache=False):
+    """Add NVD severity + published date to each finding's CVEs (cached, throttled)."""
+    cache = {} if no_cache else _load_nvd_cache()
 
-SECURITY_PAGE_URL = "https://www.debian.org/security/"
-UPSTREAM_URL = SECURITY_PAGE_URL + "#DSAS"
-SOURCE_URL = "https://github.com/blankon/tambal"
+    # cve_id -> list of CVE entries across all findings
+    cve_map = {}
+    for f in findings:
+        for c in f["cves"]:
+            cve_map.setdefault(c["id"], []).append(c)
 
+    pending = [c for c in cve_map.keys() if re.match(r"^CVE-\d{4}-\d+$", c)]
+    print(f"Enriching {len(pending)} unique CVEs from NVD ...", file=sys.stderr)
+    for i, cve_id in enumerate(pending, 1):
+        nvd = _fetch_nvd(cve_id, cache)
+        sev = nvd["severity"] if nvd else None
+        pub = nvd["published"] if nvd else None
+        for c in cve_map[cve_id]:
+            c["nvd_severity"] = sev
+            c["published"] = pub
+        if i % 20 == 0:
+            print(f"  [{i}/{len(pending)}]", file=sys.stderr)
 
-def fetch_advisories(since=None, no_cache=False):
-    html = fetch(SECURITY_PAGE_URL)
+    _save_nvd_cache(cache)
 
-    current_hash = page_hash(html)
-    prev_hash = load_prev_hash()
-    if not no_cache and prev_hash and current_hash == prev_hash:
-        print("Front page unchanged since last run. Loading cached advisories.", file=sys.stderr)
-        try:
-            with open(ADVISORIES_FILE) as f:
-                cached = json.load(f)
-            # Schema check: older caches predate the multi_cve flag.
-            if cached and any("multi_cve" not in a for a in cached):
-                print("Cached advisories use an older schema; refetching.", file=sys.stderr)
-            else:
-                return cached, True  # (advisories, from_cache)
-        except Exception:
-            pass  # fall through and re-fetch
-    save_hash(current_hash)
-
-    pattern = re.compile(
-        r"<tt>\[(\d{2}\s+\w+\s+\d{4})\]</tt>"
-        r".*?"
-        r'<a href="([^"]+)">\s*T\s*</a>'
-        r".*?"
-        r'<a href="([^"]+)">(DSA-[\d]+-\d+)\s+([^<]+)</a></strong>\s*(.*?)<br',
-        re.DOTALL,
-    )
-
-    advisories = []
-    for m in pattern.finditer(html):
-        date_str, tracker_url, announce_url, dsa_id, package, suffix = m.groups()
-        date = parse_date(date_str)
-        if since and date < since:
-            break  # list is newest-first; nothing older will match
-        advisories.append({
-            "date": format_date(date),
-            "id": dsa_id,
-            "package": package.strip(),
-            "description": f"{dsa_id} {package.strip()} {suffix.strip()}".strip(),
-            "tracker_url": tracker_url,
-            "announce_url": announce_url,
-        })
-
-    return advisories, False  # (advisories, from_cache)
+    # Recompute each finding's severity, preferring NVD over the Debian estimate.
+    for f in findings:
+        sevs = [c.get("nvd_severity") or c.get("severity") for c in f["cves"]]
+        f["severity"] = max_severity(sevs)
 
 
-# ── fetch: tracker page ───────────────────────────────────────────────────────
-
-class TableParser(HTMLParser):
-    """Parse all <table> blocks into list-of-dicts using the first <tr> as header."""
-
-    def __init__(self):
-        super().__init__()
-        self.tables = []
-        self._in_table = False
-        self._headers = []
-        self._row = []
-        self._cell = ""
-        self._in_cell = False
-        self._current_table = []
-
-    def handle_starttag(self, tag, attrs):
-        if tag == "table":
-            self._in_table = True
-            self._headers = []
-            self._current_table = []
-        elif tag in ("th", "td") and self._in_table:
-            self._in_cell = True
-            self._cell = ""
-
-    def handle_endtag(self, tag):
-        if tag == "table":
-            self._in_table = False
-            self.tables.append(self._current_table)
-        elif tag == "tr" and self._in_table:
-            if self._row:
-                if not self._headers:
-                    self._headers = self._row[:]
-                else:
-                    self._current_table.append(dict(zip(self._headers, self._row)))
-                self._row = []
-        elif tag in ("th", "td") and self._in_cell:
-            self._in_cell = False
-            self._row.append(self._cell.strip())
-
-    def handle_data(self, data):
-        if self._in_cell:
-            self._cell += data
-
-    def handle_entityref(self, name):
-        if self._in_cell:
-            self._cell += {"ensp": " ", "nbsp": " ", "amp": "&",
-                           "lt": "<", "gt": ">"}.get(name, "")
-
-    def handle_charref(self, name):
-        if self._in_cell:
-            try:
-                ch = chr(int(name[1:], 16) if name.startswith("x") else int(name))
-                self._cell += ch
-            except Exception:
-                pass
-
-
-def _parse_fixed_versions(html, source_pkg=None):
-    """
-    Parse {release, version, status} entries from the 'fixed versions' table on
-    a Debian security tracker page (DSA or CVE — both share the same structure).
-    Status is cross-referenced from the 'source packages' table on the same page.
-
-    If source_pkg is given, only entries whose Package column matches are returned
-    and the status_map is built only from that package's rows.
-    """
-    marker_src = "information on source packages"
-    marker_fix = "based on the following data on fixed versions"
-
-    idx_src = html.find(marker_src)
-    idx_fix = html.find(marker_fix)
-
-    if idx_src == -1 or idx_fix == -1:
-        return [], "markers not found"
-
-    src_html = html[idx_src:idx_fix]
-    fix_html = html[idx_fix:]
-
-    parser_src = TableParser()
-    parser_src.feed(src_html)
-
-    parser_fix = TableParser()
-    parser_fix.feed(fix_html)
-
-    if not parser_fix.tables:
-        return [], "fixed versions table not found"
-
-    fix_rows = parser_fix.tables[0]
-    src_rows = parser_src.tables[0] if parser_src.tables else []
-
-    # Build status_map from the source packages table.
-    # The table uses continuation rows (empty "Source Package" cell) for all
-    # releases after the first in each group, so we track current_pkg as we go.
-    # When source_pkg is given, only include rows belonging to that package.
-    status_map = {}
-    current_pkg = None
-    for row in src_rows:
-        sp_cell = row.get("Source Package", "").strip()
-        if sp_cell:
-            # Strip trailing suffixes like " (PTS)"
-            current_pkg = re.sub(r'\s*\(.*?\)\s*$', '', sp_cell).strip()
-
-        if source_pkg and current_pkg != source_pkg:
-            continue
-
-        release_str = row.get("Release", "").strip()
-        status = row.get("Status", "").strip()
-        if not release_str or not status:
-            continue
-        for release in release_str.split(","):
-            release = release.replace(" (security)", "").strip()
-            if release == "(unstable)":
-                release = "sid"
-            if not release:
-                continue
-            if release not in status_map or status == "fixed":
-                status_map[release] = status
-
-    results = []
-    for row in fix_rows:
-        release = row.get("Release", "").strip()
-        version = row.get("Fixed Version", "").strip()
-        row_pkg = row.get("Package", "").strip()
-
-        if source_pkg and row_pkg and row_pkg != source_pkg:
-            continue  # skip other packages
-
-        if release == "(unstable)":
-            release = "sid"
-        elif not release or release.startswith("("):
-            continue
-
-        if version.startswith("("):
-            continue
-
-        entry = {
-            "release": release,
-            "version": version,
-            "status": status_map.get(release, "fixed"),
-        }
-        if row_pkg:
-            entry["source_pkg"] = row_pkg
-        results.append(entry)
-
-    return results, None
-
-
-def _fetch_cve_versions(cve, source_pkg=None):
-    """Fetch and parse fixed versions for a single CVE ID. Returns (entries, error)."""
-    url = f"https://security-tracker.debian.org/tracker/{cve}"
-    try:
-        html = fetch(url)
-    except Exception as e:
-        return [], str(e)
-    return _parse_fixed_versions(html, source_pkg=source_pkg)
-
-
-def fetch_tracker_details(url, source_pkg=None):
-    """
-    Return (entries, error, multi_cve, cves, cve_versions) where:
-      - entries: flat list of {release, version, status} (no-CVE fallback only)
-      - error: error string or None
-      - multi_cve: True when >= n CVEs (too many to track individually)
-      - cves: list of CVE IDs found in References
-      - cve_versions: dict {cve_id: [entries]} for 1-10 CVE advisories, else {}
-
-    When source_pkg is provided, only entries for that source package are kept
-    from each CVE page (filters out unrelated packages sharing the same CVE).
-
-    Behaviour by CVE count:
-      0 CVEs   → parse DSA page directly; cve_versions = {}
-      1-n CVEs → fetch each CVE page; cve_versions = {cve: entries, ...}
-      ≥ n CVEs → multi_cve = True; cve_versions = {}
-    """
-    try:
-        html = fetch(url)
-    except Exception as e:
-        return [], str(e), False, [], {}
-
-    cves = extract_references_cves(html)
-
-    if len(cves) >= 500: # <-- Set n number here
-        return [], None, True, cves, {}
-
-    if len(cves) >= 1:
-        cve_versions = {}
-        errors = []
-        for cve in cves:
-            entries, err = _fetch_cve_versions(cve, source_pkg=source_pkg)
-            if err:
-                errors.append(f"{cve}: {err}")
-            else:
-                cve_versions[cve] = entries
-            time.sleep(random.uniform(0.5, 1.5))
-        err_msg = "; ".join(errors) if errors else None
-        return [], err_msg, False, cves, cve_versions
-
-    # No CVEs — fall back to parsing the DSA page directly.
-    results, err = _parse_fixed_versions(html, source_pkg=source_pkg)
-    return results, err, False, cves, {}
-
-
-# ── evaluate: repo discovery ──────────────────────────────────────────────────
+# ── repo discovery ────────────────────────────────────────────────────────────
 
 def discover_dists(repo_url):
     """Parse HTML directory listing at {repo}/dists/ and return dist names."""
     url = repo_url.rstrip("/") + "/dists/"
     html = fetch_text(url)
-    names = re.findall(r'href="([^"/][^"]*/)\"', html)
+    names = re.findall(r'href="([^"/][^"]*/)"', html)
     return [n.rstrip("/") for n in names]
 
 
@@ -416,7 +325,6 @@ def fetch_sources(repo_url, dist, component):
         data = fetch_bytes(url)
     except Exception:
         return {}
-
     try:
         text = gzip.decompress(data).decode("utf-8")
     except Exception:
@@ -425,7 +333,6 @@ def fetch_sources(repo_url, dist, component):
     packages = {}
     current_pkg = None
     current_ver = None
-
     for line in text.splitlines():
         if line.startswith("Package:"):
             current_pkg = line.split(":", 1)[1].strip()
@@ -439,32 +346,8 @@ def fetch_sources(repo_url, dist, component):
     return packages
 
 
-def build_sid_index(repo_url):
-    """Fetch source package versions from the 'sid' dist of an upstream repo."""
-    print(f"Fetching sid index from upstream {repo_url} ...", file=sys.stderr)
-    _, components = fetch_release(repo_url, "sid")
-    if not components:
-        print("  Warning: sid release not found or has no components.", file=sys.stderr)
-        return {}
-
-    index = {}
-    for component in components:
-        print(f"  Fetching sid/{component}/source/Sources.gz ...", file=sys.stderr)
-        pkgs = fetch_sources(repo_url, "sid", component)
-        for pkg, ver in pkgs.items():
-            existing = index.get(pkg)
-            if existing is None or version_lt(existing, ver):
-                index[pkg] = ver
-
-    print(f"  Indexed {len(index)} source packages from sid.", file=sys.stderr)
-    return index
-
-
 def build_package_index(repo_url):
-    """
-    Walk all dists and components in the repo and return a unified
-    package -> highest_version map.
-    """
+    """Walk all dists/components and return package -> highest_version map."""
     print(f"Discovering dists at {repo_url} ...", file=sys.stderr)
     dists = discover_dists(repo_url)
     if not dists:
@@ -487,103 +370,188 @@ def build_package_index(repo_url):
     return index
 
 
-# ── evaluate: check advisories against repo ──────────────────────────────────
+# ── tracker data ──────────────────────────────────────────────────────────────
 
-def evaluate(advisories, package_index):
-    """
-    For each advisory, check whether the repo's version of the package
-    is below any fixed version. Returns a list of findings.
+def load_tracker(no_cache=False):
+    """Download (and cache) the security-tracker JSON export (24h TTL)."""
+    if not no_cache and _is_fresh(TRACKER_CACHE, 86400):
+        print(f"Using cached tracker data: {TRACKER_CACHE}", file=sys.stderr)
+        with open(TRACKER_CACHE) as f:
+            return json.load(f)
+
+    print(f"Downloading {TRACKER_JSON_URL} ...", file=sys.stderr)
+    data = fetch_bytes(TRACKER_JSON_URL)
+    tracker = json.loads(data.decode("utf-8"))
+    with open(TRACKER_CACHE, "w") as f:
+        json.dump(tracker, f)
+    print(f"  Cached {len(tracker)} packages to {TRACKER_CACHE}", file=sys.stderr)
+    return tracker
+
+
+# ── DSA list ──────────────────────────────────────────────────────────────────
+
+def _ensure_dsa_list(no_cache=False):
+    """Ensure data/DSA/list exists via a shallow sparse clone (refreshed daily)."""
+    if not no_cache and _is_fresh(DSA_LIST_PATH, 86400):
+        return DSA_LIST_PATH
+
+    print("Fetching DSA list (shallow sparse clone) ...", file=sys.stderr)
+    if os.path.isdir(SEC_TRACKER_DIR):
+        shutil.rmtree(SEC_TRACKER_DIR)
+    subprocess.run(
+        ["git", "clone", "--depth", "1", "--filter=blob:none", "--sparse",
+         SEC_TRACKER_REPO, SEC_TRACKER_DIR],
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "-C", SEC_TRACKER_DIR, "sparse-checkout", "set", "data/DSA"],
+        capture_output=True,
+    )
+    return DSA_LIST_PATH if os.path.exists(DSA_LIST_PATH) else None
+
+
+def parse_dsa_list(text):
+    """Parse data/DSA/list into {CVE: DSA-id} and {DSA-id: YYYY-MM-DD} maps."""
+    dsa_map = {}
+    dsa_dates = {}
+    current = None
+    for line in text.splitlines():
+        m = re.match(r"\[(\d{2} \w{3} \d{4})\]\s+(DSA-\d+-\d+)\s+", line)
+        if m:
+            current = m.group(2)
+            dsa_dates[current] = _parse_dsa_date(m.group(1))
+            continue
+        if current:
+            m2 = re.search(r"\{([^}]*)\}", line)
+            if m2:
+                for cve in m2.group(1).split():
+                    if cve.startswith("CVE-"):
+                        dsa_map.setdefault(cve, current)
+    return dsa_map, dsa_dates
+
+
+def _parse_dsa_date(s):
+    """Parse a DSA list date like '24 Sep 2026' -> 'YYYY-MM-DD'."""
+    try:
+        return datetime.strptime(s, "%d %b %Y").strftime("%Y-%m-%d")
+    except ValueError:
+        return s
+
+
+def load_dsa_map(no_cache=False):
+    """Return ({CVE: DSA-id}, {DSA-id: date}) from data/DSA/list."""
+    path = _ensure_dsa_list(no_cache=no_cache)
+    if not path:
+        print("Warning: could not fetch the DSA list.", file=sys.stderr)
+        return {}, {}
+    with open(path) as f:
+        dsa_map, dsa_dates = parse_dsa_list(f.read())
+    print(f"Loaded {len(dsa_map)} CVE->DSA mappings.", file=sys.stderr)
+    return dsa_map, dsa_dates
+
+
+def load_dsa_announce(no_cache=False):
+    """Fetch the DSA -> announcement URL mapping from debian.org/security."""
+    if not no_cache and _is_fresh(DSA_ANNOUNCE_CACHE, 86400):
+        with open(DSA_ANNOUNCE_CACHE) as f:
+            return json.load(f)
+    try:
+        html = fetch_text(DSA_ANNOUNCE_URL)
+    except Exception:
+        print("Warning: could not fetch debian.org/security.", file=sys.stderr)
+        return {}
+    announce = {}
+    for m in re.finditer(
+        r'href="(https://lists\.debian\.org/debian-security-announce/[^"]+)"[^>]*>\s*(DSA-\d+-\d+)',
+        html,
+    ):
+        announce[m.group(2)] = m.group(1)
+    with open(DSA_ANNOUNCE_CACHE, "w") as f:
+        json.dump(announce, f)
+    print(f"Loaded {len(announce)} DSA announcement URLs.", file=sys.stderr)
+    return announce
+
+
+# ── evaluate ──────────────────────────────────────────────────────────────────
+
+def evaluate(package_index, tracker):
+    """For each package in the repo, find CVEs whose sid fix is newer than ours.
+
+    A package is flagged when at least one CVE is 'resolved' in sid at a version
+    above what the repo ships (i.e. the repo is missing that security fix).
     """
     findings = []
-
-    for adv in advisories:
-        pkg = adv["package"]
-        repo_ver = package_index.get(pkg)
-
-        if repo_ver is None:
-            continue  # package not present in this repo
-
-        if adv.get("multi_cve"):
-            findings.append({
-                "advisory_id": adv["id"],
-                "date": adv["date"],
-                "package": pkg,
-                "repo_version": repo_ver,
-                "description": adv["description"],
-                "announce_url": adv["announce_url"],
-                "tracker_url": adv["tracker_url"],
-                "vulnerable_against": [],
-                "multi_cve": True,
-                "cves": adv.get("cves", []),
-            })
+    for pkg, our_ver in package_index.items():
+        cves = tracker.get(pkg)
+        if not cves:
             continue
 
-        def _annotate_entries(fv_list):
-            """Annotate a list of fixed-version entries with below=True/False."""
-            out = []
-            vuln = False
-            for fv in fv_list:
-                fixed_ver = fv.get("version", "").strip()
-                status = fv.get("status", "").strip()
-                if not fixed_ver:
-                    continue
-                below = False
-                if status == "fixed":
-                    below = version_lt(repo_ver, fixed_ver)
-                elif status in ("vulnerable", "unfixed"):
-                    below = not version_lt(repo_ver, fixed_ver)
-                if below:
-                    vuln = True
-                out.append({
-                    "release": fv["release"],
-                    "fixed_version": fixed_ver,
-                    "status": status,
-                    "below": below,
-                })
-            return out, vuln
+        # fixed_version -> list of CVE ids resolved at that version in sid
+        fixed_map = {}
+        for cve, info in cves.items():
+            if not isinstance(info, dict):
+                continue
+            sid = info.get("releases", {}).get("sid", {})
+            if sid.get("status") != "resolved":
+                continue
+            fv = sid.get("fixed_version")
+            if fv and fv != "0":
+                fixed_map.setdefault(fv, []).append(cve)
 
-        adv_cve_versions = adv.get("cve_versions", {})
-        if adv_cve_versions:
-            # 1-5 CVEs: evaluate each CVE independently.
-            is_vulnerable = False
-            result_cve_versions = {}
-            for cve, fv_list in adv_cve_versions.items():
-                annotated, vuln = _annotate_entries(fv_list)
-                result_cve_versions[cve] = annotated
-                if vuln:
-                    is_vulnerable = True
+        if not fixed_map:
+            continue
 
-            if is_vulnerable:
-                findings.append({
-                    "advisory_id": adv["id"],
-                    "date": adv["date"],
-                    "package": pkg,
-                    "repo_version": repo_ver,
-                    "description": adv["description"],
-                    "announce_url": adv["announce_url"],
-                    "tracker_url": adv["tracker_url"],
-                    "cve_versions": result_cve_versions,
-                    "vulnerable_against": [
-                        e for entries in result_cve_versions.values() for e in entries
-                    ],
-                    "cves": adv.get("cves", []),
-                })
-        else:
-            # No CVEs: fall back to flat fixed_versions list.
-            fixed_versions, is_vulnerable = _annotate_entries(adv.get("fixed_versions", []))
-            if is_vulnerable:
-                findings.append({
-                    "advisory_id": adv["id"],
-                    "date": adv["date"],
-                    "package": pkg,
-                    "repo_version": repo_ver,
-                    "description": adv["description"],
-                    "announce_url": adv["announce_url"],
-                    "tracker_url": adv["tracker_url"],
-                    "vulnerable_against": fixed_versions,
-                    "cves": adv.get("cves", []),
-                })
+        # Only versions strictly above ours mean we're missing a fix.
+        vuln_versions = [fv for fv in fixed_map if version_lt(our_ver, fv)]
+        if not vuln_versions:
+            continue
 
+        target = max_version(vuln_versions)
+
+        cve_list = []
+        for fv in vuln_versions:
+            for cve in fixed_map[fv]:
+                info = cves[cve]
+                cve_list.append({
+                    "id": cve,
+                    "fixed_version": fv,
+                    "description": info.get("description", ""),
+                    "severity": extract_severity(info),
+                })
+        # Show highest-version CVEs first; cap the list for huge packages.
+        cve_list.sort(key=lambda c: c["fixed_version"], reverse=True)
+        cve_list = cve_list[:100]
+
+        sev = max_severity([c["severity"] for c in cve_list])
+
+        # Per-release fixed versions (for the "stable releases" view).
+        release_map = {}
+        for fv in vuln_versions:
+            for cve in fixed_map[fv]:
+                for rel, relinfo in cves[cve].get("releases", {}).items():
+                    if relinfo.get("status") != "resolved":
+                        continue
+                    rfv = relinfo.get("fixed_version")
+                    if not rfv or rfv == "0":
+                        continue
+                    if rel not in release_map or version_lt(release_map[rel], rfv):
+                        release_map[rel] = rfv
+        stable_releases = [
+            {"release": r, "version": release_map[r]}
+            for r in sorted(release_map)
+        ]
+
+        findings.append({
+            "package": pkg,
+            "severity": sev,
+            "our_version": our_ver,
+            "fixed_version": target,
+            "stable_releases": stable_releases,
+            "cves": cve_list,
+        })
+
+    # Newest / largest gap first is more useful for triage.
+    findings.sort(key=lambda f: f["package"])
     return findings
 
 
@@ -737,6 +705,24 @@ PAGE_STYLE = """
     .failures .note { color: var(--muted); font-size: 0.88rem; margin: 0 0 0.75rem; }
     .failures .url { word-break: break-all; }
     .failures .err { color: var(--bad); }
+    .ver-our { color: var(--bad); font-weight: bold; }
+    .ver-fix { color: var(--ok); font-weight: bold; }
+    .sev-critical { color: var(--bad); font-weight: bold; }
+    .sev-high { color: #e67e22; font-weight: bold; }
+    .sev-medium { color: #b8860b; }
+    .sev-low { color: var(--muted); }
+    .filters { display: flex; gap: 0.6rem; align-items: center; margin: 0.75rem 0 1rem; flex-wrap: wrap; }
+    .filters input[type="text"] { font: inherit; padding: 0.4rem 0.6rem; min-width: 220px;
+      border: 1px solid var(--border); background: var(--bg); color: var(--fg); border-radius: 0.375rem; }
+    .filters select { font: inherit; padding: 0.4rem 0.6rem; border: 1px solid var(--border);
+      background: var(--bg); color: var(--fg); border-radius: 0.375rem; }
+    .sev-badge { display: inline-block; padding: 0.12rem 0.55rem; border-radius: 999px;
+      font-size: 0.8rem; margin: 0 0.3rem 0.3rem 0; border: 1px solid var(--border); white-space: nowrap; }
+    .sev-badge.critical { color: var(--bad); border-color: var(--bad); }
+    .sev-badge.high { color: #e67e22; border-color: #e67e22; }
+    .sev-badge.medium { color: #b8860b; border-color: #b8860b; }
+    .sev-badge.low { color: var(--muted); }
+    .sev-badge.unknown { color: var(--muted); }
     footer {
       margin-top: 2.5rem; padding-top: 1rem;
       border-top: 1px solid var(--border);
@@ -859,151 +845,158 @@ NAV_SCRIPT = """
   })();
 """
 
+FILTER_SCRIPT = """<script>
+(function () {
+  var input = document.getElementById('filter-pkg');
+  var sel = document.getElementById('filter-sev');
+  var dsaSel = document.getElementById('filter-dsa');
+  if (!input || !sel) return;
+  function apply() {
+    var q = input.value.toLowerCase().trim();
+    var sev = sel.value;
+    var dsaV = dsaSel ? dsaSel.value : '';
+    document.querySelectorAll('tbody tr[data-pkg]').forEach(function (tr) {
+      var pkg = tr.getAttribute('data-pkg') || '';
+      var s = tr.getAttribute('data-sev') || '';
+      var d = tr.getAttribute('data-dsa') || '';
+      var okP = !q || pkg.indexOf(q) !== -1;
+      var okS = !sev || s === sev;
+      var okD = true;
+      if (dsaV === 'has') okD = d.trim() !== '';
+      else if (dsaV === 'none') okD = d.trim() === '';
+      tr.style.display = (okP && okS && okD) ? '' : 'none';
+    });
+  }
+  input.addEventListener('input', apply);
+  sel.addEventListener('change', apply);
+  if (dsaSel) dsaSel.addEventListener('change', apply);
+})();
+</script>
+"""
 
-def write_html_report(findings, html_dir, repo_url, upstream_repo=None, failures=None):
+
+def write_html_report(findings, html_dir, repo_url, dsa_map=None, dsa_announce=None, dsa_dates=None, failures=None):
     import html as _html
-
-    generated_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S %Z") or datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S %z")
 
     def e(s):
         return _html.escape(str(s))
 
-    import functools
+    def finding_date_info(f):
+        """Return (date_str, source) for a finding: latest DSA date ('dsa'),
+        else latest NVD published ('nvd'), or (None, None)."""
+        if dsa_dates:
+            dsas = []
+            for c in f.get("cves", []):
+                d = (dsa_map or {}).get(c["id"])
+                if d and dsa_dates.get(d):
+                    dsas.append(dsa_dates[d])
+            if dsas:
+                return max(dsas), "dsa"
+        dates = [c.get("published") for c in f.get("cves", []) if c.get("published")]
+        if dates:
+            return max(dates).split("T")[0], "nvd"
+        return None, None
 
-    def _sort_entries(entries):
-        def _cmp_ver(a, b):
-            if version_lt(a["fixed_version"], b["fixed_version"]):
-                return 1
-            if version_lt(b["fixed_version"], a["fixed_version"]):
-                return -1
-            return 0
-        return sorted(entries, key=functools.cmp_to_key(_cmp_ver))
-
-    def _entries_to_rows(entries):
-        # Group by source_pkg when multiple source packages are present.
-        pkgs = []
-        seen = {}
-        for v in entries:
-            sp = v.get("source_pkg", "")
-            if sp not in seen:
-                seen[sp] = []
-                pkgs.append(sp)
-            seen[sp].append(v)
-
-        if len(pkgs) > 1:
-            html_rows = []
-            for sp in pkgs:
-                html_rows.append(
-                    f'<tr><td colspan="3" class="grp">{e(sp)}</td></tr>'
-                )
-                for v in _sort_entries(seen[sp]):
-                    html_rows.append(
-                        f'<tr>'
-                        f'<td>{e(v["release"])}</td>'
-                        f'<td>{e(v["fixed_version"])}</td>'
-                        f'<td>{e(v["status"])}</td>'
-                        f'</tr>'
-                    )
-            return "".join(html_rows)
-
-        return "".join(
-            f'<tr>'
-            f'<td>{e(v["release"])}</td>'
-            f'<td>{e(v["fixed_version"])}</td>'
-            f'<td>{e(v["status"])}</td>'
-            f'</tr>'
-            for v in _sort_entries(entries)
-        )
+    show_dsa = dsa_map is not None
+    generated_at = datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S %Z")
 
     rows = []
     for f in findings:
-        if f.get("multi_cve"):
-            ver_class = "ver-below"
-            fixes = (
-                '<tr><td colspan="3"><strong>Vulnerable - multiple CVEs (≥ 500)</strong>'
-                ' — see tracker for details.</td></tr>'
-            )
-        elif f.get("cve_versions") and len(f["cve_versions"]) > 1:
-            # Multiple tracked CVEs: one sub-table per CVE.
-            all_fixed = [v["fixed_version"] for v in f["vulnerable_against"] if v["fixed_version"]]
-            latest_fixed = None
-            for fv in all_fixed:
-                if latest_fixed is None or version_lt(latest_fixed, fv):
-                    latest_fixed = fv
-            repo_below_latest = latest_fixed is not None and version_lt(f["repo_version"], latest_fixed)
-            ver_class = "ver-below" if repo_below_latest else "ver-above"
+        cve_links = ", ".join(
+            f'<a href="https://security-tracker.debian.org/tracker/{e(c["id"])}" target="_blank">{e(c["id"])}</a>'
+            for c in f["cves"]
+        )
+        desc = f["cves"][0]["description"] if f["cves"] else ""
+        desc = desc if len(desc) <= 240 else desc[:240] + "…"
 
-            cve_blocks = []
-            for cve_id, entries in f["cve_versions"].items():
-                cve_url = f"https://security-tracker.debian.org/tracker/{e(cve_id)}"
-                header = (
-                    f'<tr><td colspan="3" class="cve-head">'
-                    f'<a href="{cve_url}" target="_blank">{e(cve_id)}</a></td></tr>'
-                )
-                cve_blocks.append(header + _entries_to_rows(entries))
-            fixes = "".join(cve_blocks)
-        else:
-            # Single CVE or no CVE: flat table.
-            all_fixed = [v["fixed_version"] for v in f["vulnerable_against"] if v["fixed_version"]]
-            latest_fixed = None
-            for fv in all_fixed:
-                if latest_fixed is None or version_lt(latest_fixed, fv):
-                    latest_fixed = fv
-            repo_below_latest = latest_fixed is not None and version_lt(f["repo_version"], latest_fixed)
-            ver_class = "ver-below" if repo_below_latest else "ver-above"
-            fixes = _entries_to_rows(f["vulnerable_against"])
-        # Extract sid version from the CVE table data
-        sid_entries = [v for v in f.get("vulnerable_against", []) if v.get("release") == "sid"]
-        if sid_entries:
-            best_sid = sid_entries[0]
-            for s in sid_entries[1:]:
-                if version_lt(best_sid["fixed_version"], s["fixed_version"]):
-                    best_sid = s
-            any_not_fixed = any(s["status"] != "fixed" for s in sid_entries)
-            sid_color = "ver-below" if any_not_fixed else "ver-above"
-            sid_cell = (
-                f'<td class="{sid_color}" data-label="Upstream version (Sid)">'
-                f'{e(best_sid["fixed_version"])}</td>'
-            )
-        else:
-            sid_cell = '<td class="none" data-label="Upstream version (Sid)">—</td>'
+        rel_rows = "".join(
+            f'<tr><td>{e(r["release"])}</td><td>{e(r["version"])}</td></tr>'
+            for r in f.get("stable_releases", [])
+        )
+        rel_table = (
+            f'<table class="inner"><tr><th>Release</th><th>Version</th></tr>{rel_rows}</table>'
+        )
 
-        # Build CVE links
-        cves = f.get("cves", [])
-        if cves:
-            cve_links = ", ".join(
-                f'<a href="https://security-tracker.debian.org/tracker/{e(cve)}" target="_blank">{e(cve)}</a>'
-                for cve in cves
-            )
-            advisory_cell = (
-                f'<div><a href="{e(f["announce_url"])}" target="_blank">{e(f["advisory_id"])}</a> | '
-                f'<a href="{e(f["tracker_url"])}" target="_blank">Tracker</a></div>'
-                f'<div class="cve-list">CVE: {cve_links}</div>'
-            )
-        else:
-            advisory_cell = (
-                f'<a href="{e(f["announce_url"])}" target="_blank">{e(f["advisory_id"])}</a> | '
-                f'<a href="{e(f["tracker_url"])}" target="_blank">Tracker</a>'
-            )
+        sev = f.get("severity")
+        sev_key = sev.lower() if sev else "unknown"
+        sev_cls = f"sev-{sev_key}" if sev else ""
+        sev_cell = f'<td class="{sev_cls}">{e(sev) if sev else "—"}</td>'
+
+        dsa_ids = []
+        for c in f["cves"]:
+            d = (dsa_map or {}).get(c["id"])
+            if d and d not in dsa_ids:
+                dsa_ids.append(d)
+        dsa_attr = " ".join(dsa_ids)
+
+        # Advisory cell: date context + DSA lines (if any) above the CVE list.
+        date_str, date_src = finding_date_info(f)
+        adv_parts = []
+        if date_str:
+            label = "DSA date" if date_src == "dsa" else "CVE published"
+            adv_parts.append(f'{label}: {date_str}')
+        if show_dsa and dsa_ids:
+            for d in dsa_ids:
+                ann = (dsa_announce or {}).get(d)
+                label = f'<a href="{e(ann)}" target="_blank">{e(d)}</a>' if ann else e(d)
+                tracker = f'<a href="https://security-tracker.debian.org/tracker/{e(d)}" target="_blank">Tracker</a>'
+                adv_parts.append(f'{label} | {tracker}')
+        adv_parts.append(f'{len(f["cves"])} CVE: {cve_links}')
+        advisory_cell = f'<td class="cve-list">{"<br>".join(adv_parts)}</td>'
+
+        # Details cell: fixed-in-stable-releases table + description.
+        details_cell = f'<td>{rel_table}<div class="cve-list">{e(desc)}</div></td>'
 
         rows.append(f"""
-        <tr>
-          <td data-label="Date">{e(f['date'])}</td>
-          <td data-label="Package">{e(f['package'])}</td>
-          <td data-label="Advisory">{advisory_cell}</td>
-          <td class="{ver_class}" data-label="Our version">{e(f['repo_version'])}</td>
-          {sid_cell}
-          <td data-label="Fixed version in stable releases">
-            <table class="inner">
-              <tr><th>Release</th><th>Version</th><th>Status</th></tr>
-              {fixes}
-            </table>
-          </td>
+        <tr data-pkg="{e(f['package'].lower())}" data-sev="{sev_key}" data-dsa="{e(dsa_attr)}">
+          <td>{e(f['package'])}</td>
+          {sev_cell}
+          <td class="ver-our">{e(f['our_version'])}</td>
+          <td class="ver-fix">{e(f['fixed_version'])}</td>
+          {advisory_cell}
+          {details_cell}
         </tr>""")
 
-    rows_html = "\n".join(rows)
     count = len(findings)
-    summary = f"{count} potentially vulnerable package(s) found." if count else "No vulnerable packages found."
+    summary = f"{count} package(s) behind Debian security fixes." if count else "All packages up to date."
+
+    # Severity summary badges.
+    sev_counts = {}
+    for f in findings:
+        key = (f.get("severity") or "unknown").lower()
+        sev_counts[key] = sev_counts.get(key, 0) + 1
+    badges = "".join(
+        f'<span class="sev-badge {k}">{k.capitalize()}: {n}</span>'
+        for k, n in (("critical", sev_counts.get("critical", 0)),
+                     ("high", sev_counts.get("high", 0)),
+                     ("medium", sev_counts.get("medium", 0)),
+                     ("low", sev_counts.get("low", 0)),
+                     ("unknown", sev_counts.get("unknown", 0)))
+        if n
+    )
+    badges_html = f'<div class="filters">{badges}</div>' if badges else ""
+
+    filters_html = ""
+    if count:
+        dsa_filter = '''
+    <select id="filter-dsa">
+      <option value="">All</option>
+      <option value="has">Has DSA</option>
+      <option value="none">No DSA</option>
+    </select>''' if show_dsa else ''
+        filters_html = f'''
+  <div class="filters">
+    <input type="text" id="filter-pkg" placeholder="Filter by package…">
+    <select id="filter-sev">
+      <option value="">All severities</option>
+      <option value="critical">Critical</option>
+      <option value="high">High</option>
+      <option value="medium">Medium</option>
+      <option value="low">Low</option>
+      <option value="unknown">Unknown</option>
+    </select>
+    {dsa_filter}
+  </div>'''
 
     # Fetches that never came back, so the reader knows the table above may be
     # missing advisories or versions.
@@ -1041,7 +1034,7 @@ def write_html_report(findings, html_dir, repo_url, upstream_repo=None, failures
         <tr><th>Time</th><th>URL</th><th>Tried</th><th>Error</th></tr>
       </thead>
       <tbody>
-        {"".join(fail_rows)}
+        {''.join(fail_rows)}
       </tbody>
     </table>
   </section>"""
@@ -1063,40 +1056,34 @@ def write_html_report(findings, html_dir, repo_url, upstream_repo=None, failures
   <h1>BlankOn Linux Security Report</h1>
   <div class="meta">
     Repository: <a href="{e(repo_url)}" target="_blank">{e(repo_url)}</a>
-    &nbsp;|&nbsp; Upstream: <a href="{e(UPSTREAM_URL)}" target="_blank">{e(UPSTREAM_URL)}</a>
+    &nbsp;|&nbsp; Upstream: <a href="{e(TRACKER_URL)}" target="_blank">Tracker</a>
+ &nbsp;|&nbsp; <a href="{e(DSA_URL)}" target="_blank">DSA</a>
     &nbsp;|&nbsp; Generated: {e(generated_at)}
   </div>
   <div class="summary {"bad" if count else "ok"}">{e(summary)}</div>
-  {"" if not count else f"""
-  <table class="report">
+  {badges_html}
+  {filters_html}
+  {"" if not count else f'''
+  <table>
     <thead>
-      <tr>
-        <th>Date</th>
-        <th>Package</th>
-        <th>Advisory</th>
-        <th>Our version</th>
-        <th>Upstream version (Sid)</th>
-        <th>Fixed version in stable releases</th>
-      </tr>
+      <tr><th>Package</th><th>Severity</th><th>Our version</th><th>Fixed (Sid)</th><th>Advisory</th><th>Details</th></tr>
     </thead>
-    <tbody>
-      {rows_html}
-    </tbody>
-  </table>"""}
+    <tbody>{''.join(rows)}</tbody>
+  </table>'''}
   {failures_html}
   <footer>
     Source code: <a href="{e(SOURCE_URL)}" target="_blank">{e(SOURCE_URL)}</a>
   </footer>
 </main>
+{FILTER_SCRIPT}
 <script>{NAV_SCRIPT}</script>
 </body>
 </html>
 """
-
     os.makedirs(html_dir, exist_ok=True)
     out_path = os.path.join(html_dir, "index.html")
-    with open(out_path, "w") as f:
-        f.write(page)
+    with open(out_path, "w") as fh:
+        fh.write(page)
     print(f"HTML report written to {out_path}", file=sys.stderr)
 
 
@@ -1104,105 +1091,79 @@ def write_html_report(findings, html_dir, repo_url, upstream_repo=None, failures
 
 def main():
     repo_url = None
-    upstream_repo = None
-    since = None
-    output = ADVISORIES_FILE
-    no_cache = False
+    output = None
     html_dir = None
+    no_cache = False
+    no_nvd = False
+    no_dsa = False
+    min_severity = None
 
     for arg in sys.argv[1:]:
         if arg.startswith("--repo=") or arg.startswith("--repository="):
             repo_url = arg.split("=", 1)[1]
-        elif arg.startswith("--upstream-repo="):
-            upstream_repo = arg.split("=", 1)[1]
-        elif arg.startswith("--since="):
-            val = arg.split("=", 1)[1]
-            try:
-                since = datetime.strptime(val, "%Y-%m-%d").date()
-            except ValueError:
-                print(f"Error: --since must be in yyyy-mm-dd format, got '{val}'", file=sys.stderr)
-                sys.exit(1)
         elif arg.startswith("--output="):
             output = arg.split("=", 1)[1]
         elif arg.startswith("--html="):
             html_dir = arg.split("=", 1)[1]
         elif arg == "--no-cache":
             no_cache = True
+        elif arg == "--no-nvd":
+            no_nvd = True
+        elif arg == "--no-dsa":
+            no_dsa = True
+        elif arg.startswith("--min-severity="):
+            min_severity = arg.split("=", 1)[1].lower()
 
     if not repo_url:
         print("Error: --repo=/url or --repository=/url is required", file=sys.stderr)
         sys.exit(1)
 
-    # Step 1: fetch advisories
-    print("Fetching advisory list...", file=sys.stderr)
-    advisories, from_cache = fetch_advisories(since=since, no_cache=no_cache)
-
-    if not from_cache:
-        print(f"Found {len(advisories)} advisories. Fetching tracker details...", file=sys.stderr)
-        results = []
-        for i, adv in enumerate(advisories, 1):
-            print(f"  [{i}/{len(advisories)}] {adv['id']} ...", file=sys.stderr, end="\r")
-            details, err, multi_cve, cves, cve_versions = fetch_tracker_details(
-                adv["tracker_url"], source_pkg=adv["package"]
-            )
-            if err:
-                print(f"\n  Warning: {adv['id']}: {err}", file=sys.stderr)
-            adv["fixed_versions"] = details
-            adv["multi_cve"] = multi_cve
-            adv["cves"] = cves
-            adv["cve_versions"] = cve_versions
-            results.append(adv)
-            time.sleep(random.uniform(1.0, 3.0))
-
-        with open(output, "w") as f:
-            json.dump(results, f, indent=2)
-        print(f"\nAdvisories written to {output}", file=sys.stderr)
-        advisories = results
-
-    # Step 2: evaluate repo
+    tracker = load_tracker(no_cache=no_cache)
     package_index = build_package_index(repo_url)
+    if no_dsa:
+        dsa_map = None
+        dsa_announce = None
+        dsa_dates = None
+    else:
+        dsa_map, dsa_dates = load_dsa_map(no_cache=no_cache)
+        dsa_announce = load_dsa_announce(no_cache=no_cache)
 
-    upstream_index = {}
-    if upstream_repo:
-        upstream_index = build_sid_index(upstream_repo)
+    print("Evaluating packages ...", file=sys.stderr)
+    findings = evaluate(package_index, tracker)
 
-    print("Evaluating advisories ...", file=sys.stderr)
-    findings = evaluate(advisories, package_index)
+    if not no_nvd:
+        enrich_nvd(findings, no_cache=no_cache)
 
-    if upstream_index:
-        for f in findings:
-            f["upstream_version"] = upstream_index.get(f["package"])
+    if min_severity:
+        min_rank = SEVERITY_RANK.get(min_severity)
+        if min_rank is None:
+            print(f"Error: invalid --min-severity '{min_severity}' (use critical/high/medium/low)", file=sys.stderr)
+            sys.exit(1)
+        findings = [
+            f for f in findings
+            if f.get("severity") and SEVERITY_RANK.get(f["severity"].lower(), 0) >= min_rank
+        ]
 
-    if FETCH_FAILURES:
-        print(f"\n{len(FETCH_FAILURES)} fetch(es) failed after retries:", file=sys.stderr)
-        for fail in FETCH_FAILURES:
-            print(f"  {fail['url']} -> {fail['error']}", file=sys.stderr)
-        print("Report data may be incomplete.\n", file=sys.stderr)
+    if output:
+        with open(output, "w") as f:
+            json.dump(findings, f, indent=2)
+        print(f"Findings written to {output}", file=sys.stderr)
 
     if not findings:
         print("No vulnerable packages found.", file=sys.stderr)
         if html_dir:
-            write_html_report(findings, html_dir, repo_url, upstream_repo=upstream_repo,
-                              failures=FETCH_FAILURES)
+            write_html_report(findings, html_dir, repo_url, dsa_map=dsa_map, dsa_announce=dsa_announce, dsa_dates=dsa_dates, failures=FETCH_FAILURES)
+        report_fetch_failures()
         sys.exit(0)
 
-    print(f"Found {len(findings)} potentially vulnerable package(s):\n", file=sys.stderr)
-
+    print(f"Found {len(findings)} package(s) behind Debian security fixes:\n", file=sys.stderr)
     for f in findings:
-        print(f"[{f['date']}] {f['advisory_id']}  {f['package']}")
-        print(f"  Our version : {f['repo_version']}")
-        if f.get("multi_cve"):
-            print(f"  Status       : Vulnerable - multiple CVEs")
-        else:
-            for v in f["vulnerable_against"]:
-                print(f"  Below fix    : {v['fixed_version']}  (for {v['release']}, status: {v['status']})")
-        print(f"  Description  : {f['description']}")
-        print(f"  Announce     : {f['announce_url']}")
-        print()
+        print(f"  {f['package']}: {f['our_version']} -> {f['fixed_version']} ({len(f['cves'])} CVE)")
 
     if html_dir:
-        write_html_report(findings, html_dir, repo_url, upstream_repo=upstream_repo,
-                          failures=FETCH_FAILURES)
+        write_html_report(findings, html_dir, repo_url, dsa_map=dsa_map, dsa_announce=dsa_announce, dsa_dates=dsa_dates, failures=FETCH_FAILURES)
+
+    report_fetch_failures()
 
 
 if __name__ == "__main__":

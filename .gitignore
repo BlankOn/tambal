@@ -1,2 +1,11 @@
 venv
 prev_load.hash
+tracker.json
+nvd-cache.json
+dsa-announce.json
+__pycache__/
+*.pyc
+.env
+advisories.json
+security-advisories/
+sec-tracker/
