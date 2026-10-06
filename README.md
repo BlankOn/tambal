@@ -14,9 +14,15 @@ This is part of BlankOn's responsibility as derivative distribution.
 python3 tambal.py --repo=http://arsip-dev.blankonlinux.id/sinambung/ --output=./advisories.json --html=./security-advisories
 ```
 
+To report on `arsip` and `arsip-dev` in one page, repeat `--repo`:
+
+```
+python3 tambal.py --repo=http://arsip-dev.blankonlinux.id/sinambung/ --repo=https://arsip.blankonlinux.id/sinambung/ --output=./advisories.json --html=./security-advisories
+```
+
 ## Options
 
-- `--repo=` / `--repository=` — target repository root (required).
+- `--repo=` / `--repository=` — target repository root (required). Repeat it to scan several repositories: the HTML report gets one tab per repository, titled by the first label of its host (`arsip-dev`, `arsip`), and `--output` becomes a JSON object keyed by the same labels. A single repository still writes a plain list.
 - `--output=` — write the JSON findings to this file (optional).
 - `--html=` — write the HTML report to this directory (optional).
 - `--no-cache` — re-download the Debian security-tracker data instead of using the cached `tracker.json`.
