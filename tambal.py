@@ -28,6 +28,7 @@ import subprocess
 import sys
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from datetime import datetime
 
@@ -295,12 +296,18 @@ def enrich_nvd(findings, no_cache=False):
 
 # ── repo discovery ────────────────────────────────────────────────────────────
 
+def repo_label(repo_url):
+    """Short name that titles a repository's tab: the first label of its host."""
+    host = urllib.parse.urlparse(repo_url).hostname or repo_url
+    return host.split(".")[0]
+
+
 def discover_dists(repo_url):
     """Parse HTML directory listing at {repo}/dists/ and return dist names."""
     url = repo_url.rstrip("/") + "/dists/"
     html = fetch_text(url)
     names = re.findall(r'href="([^"/][^"]*/)"', html)
-    return [n.rstrip("/") for n in names]
+    return [n.rstrip("/") for n in names if not n.startswith(".")]
 
 
 def fetch_release(repo_url, dist):
@@ -716,6 +723,16 @@ PAGE_STYLE = """
       border: 1px solid var(--border); background: var(--bg); color: var(--fg); border-radius: 0.375rem; }
     .filters select { font: inherit; padding: 0.4rem 0.6rem; border: 1px solid var(--border);
       background: var(--bg); color: var(--fg); border-radius: 0.375rem; }
+    .tabs { display: none; gap: 0.25rem; border-bottom: 1px solid var(--border); margin: 0 0 1rem; flex-wrap: wrap; }
+    .js .tabs { display: flex; }
+    .tabs button { font: inherit; padding: 0.5rem 1rem; background: none; border: 0;
+      border-bottom: 2px solid transparent; margin-bottom: -1px; color: var(--muted); cursor: pointer; }
+    .tabs button:hover { color: var(--fg); }
+    .tabs button[aria-selected="true"] { color: var(--fg); border-bottom-color: var(--link); }
+    .panel-title { font-size: 1.1rem; margin: 1.5rem 0 0.25rem; }
+    .js .panel-title { display: none; }
+    .js .panel { display: none; }
+    .js .panel.active { display: block; }
     .sev-badge { display: inline-block; padding: 0.12rem 0.55rem; border-radius: 999px;
       font-size: 0.8rem; margin: 0 0.3rem 0.3rem 0; border: 1px solid var(--border); white-space: nowrap; }
     .sev-badge.critical { color: var(--bad); border-color: var(--bad); }
@@ -847,35 +864,67 @@ NAV_SCRIPT = """
 
 FILTER_SCRIPT = """<script>
 (function () {
-  var input = document.getElementById('filter-pkg');
-  var sel = document.getElementById('filter-sev');
-  var dsaSel = document.getElementById('filter-dsa');
-  if (!input || !sel) return;
-  function apply() {
-    var q = input.value.toLowerCase().trim();
-    var sev = sel.value;
-    var dsaV = dsaSel ? dsaSel.value : '';
-    document.querySelectorAll('tbody tr[data-pkg]').forEach(function (tr) {
-      var pkg = tr.getAttribute('data-pkg') || '';
-      var s = tr.getAttribute('data-sev') || '';
-      var d = tr.getAttribute('data-dsa') || '';
-      var okP = !q || pkg.indexOf(q) !== -1;
-      var okS = !sev || s === sev;
-      var okD = true;
-      if (dsaV === 'has') okD = d.trim() !== '';
-      else if (dsaV === 'none') okD = d.trim() === '';
-      tr.style.display = (okP && okS && okD) ? '' : 'none';
+  document.querySelectorAll('.panel').forEach(function (panel) {
+    var input = panel.querySelector('.filter-pkg');
+    var sel = panel.querySelector('.filter-sev');
+    var dsaSel = panel.querySelector('.filter-dsa');
+    if (!input || !sel) return;
+    function apply() {
+      var q = input.value.toLowerCase().trim();
+      var sev = sel.value;
+      var dsaV = dsaSel ? dsaSel.value : '';
+      panel.querySelectorAll('tbody tr[data-pkg]').forEach(function (tr) {
+        var pkg = tr.getAttribute('data-pkg') || '';
+        var s = tr.getAttribute('data-sev') || '';
+        var d = tr.getAttribute('data-dsa') || '';
+        var okP = !q || pkg.indexOf(q) !== -1;
+        var okS = !sev || s === sev;
+        var okD = true;
+        if (dsaV === 'has') okD = d.trim() !== '';
+        else if (dsaV === 'none') okD = d.trim() === '';
+        tr.style.display = (okP && okS && okD) ? '' : 'none';
+      });
+    }
+    input.addEventListener('input', apply);
+    sel.addEventListener('change', apply);
+    if (dsaSel) dsaSel.addEventListener('change', apply);
+  });
+})();
+</script>
+"""
+
+TABS_SCRIPT = """<script>
+(function () {
+  var tabs = document.querySelectorAll('.tabs [role="tab"]');
+  if (!tabs.length) return;
+  document.documentElement.classList.add('js');
+  function show(id) {
+    tabs.forEach(function (t) {
+      t.setAttribute('aria-selected', t.getAttribute('data-panel') === id ? 'true' : 'false');
+    });
+    document.querySelectorAll('.panel').forEach(function (p) {
+      p.classList.toggle('active', p.id === id);
     });
   }
-  input.addEventListener('input', apply);
-  sel.addEventListener('change', apply);
-  if (dsaSel) dsaSel.addEventListener('change', apply);
+  function fromHash() {
+    var el = document.getElementById('repo-' + location.hash.replace('#', ''));
+    return el && el.classList.contains('panel') ? el.id : tabs[0].getAttribute('data-panel');
+  }
+  tabs.forEach(function (t) {
+    t.addEventListener('click', function () {
+      var id = t.getAttribute('data-panel');
+      history.replaceState(null, '', '#' + id.replace(/^repo-/, ''));
+      show(id);
+    });
+  });
+  window.addEventListener('hashchange', function () { show(fromHash()); });
+  show(fromHash());
 })();
 </script>
 """
 
 
-def write_html_report(findings, html_dir, repo_url, dsa_map=None, dsa_announce=None, dsa_dates=None, failures=None):
+def write_html_report(reports, html_dir, dsa_map=None, dsa_announce=None, dsa_dates=None, failures=None):
     import html as _html
 
     def e(s):
@@ -897,106 +946,156 @@ def write_html_report(findings, html_dir, repo_url, dsa_map=None, dsa_announce=N
             return max(dates).split("T")[0], "nvd"
         return None, None
 
+    def panel_id(label):
+        return "repo-" + re.sub(r"[^a-z0-9]+", "-", label.lower()).strip("-")
+
     show_dsa = dsa_map is not None
     generated_at = datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S %Z")
 
-    rows = []
-    for f in findings:
-        cve_links = ", ".join(
-            f'<a href="https://security-tracker.debian.org/tracker/{e(c["id"])}" target="_blank">{e(c["id"])}</a>'
-            for c in f["cves"]
+    def render_panel(report, multi):
+        findings = report["findings"]
+        repo_url = report["repo_url"]
+        label = report["label"]
+        rows = []
+        for f in findings:
+            cve_links = ", ".join(
+                f'<a href="https://security-tracker.debian.org/tracker/{e(c["id"])}" target="_blank">{e(c["id"])}</a>'
+                for c in f["cves"]
+            )
+            desc = f["cves"][0]["description"] if f["cves"] else ""
+            desc = desc if len(desc) <= 240 else desc[:240] + "…"
+
+            rel_rows = "".join(
+                f'<tr><td>{e(r["release"])}</td><td>{e(r["version"])}</td></tr>'
+                for r in f.get("stable_releases", [])
+            )
+            rel_table = (
+                f'<table class="inner"><tr><th>Release</th><th>Version</th></tr>{rel_rows}</table>'
+            )
+
+            sev = f.get("severity")
+            sev_key = sev.lower() if sev else "unknown"
+            sev_cls = f"sev-{sev_key}" if sev else ""
+            sev_cell = f'<td class="{sev_cls}">{e(sev) if sev else "—"}</td>'
+
+            dsa_ids = []
+            for c in f["cves"]:
+                d = (dsa_map or {}).get(c["id"])
+                if d and d not in dsa_ids:
+                    dsa_ids.append(d)
+            dsa_attr = " ".join(dsa_ids)
+
+            # Advisory cell: date context + DSA lines (if any) above the CVE list.
+            date_str, date_src = finding_date_info(f)
+            adv_parts = []
+            if date_str:
+                label = "DSA date" if date_src == "dsa" else "CVE published"
+                adv_parts.append(f'{label}: {date_str}')
+            if show_dsa and dsa_ids:
+                for d in dsa_ids:
+                    ann = (dsa_announce or {}).get(d)
+                    label = f'<a href="{e(ann)}" target="_blank">{e(d)}</a>' if ann else e(d)
+                    tracker = f'<a href="https://security-tracker.debian.org/tracker/{e(d)}" target="_blank">Tracker</a>'
+                    adv_parts.append(f'{label} | {tracker}')
+            adv_parts.append(f'{len(f["cves"])} CVE: {cve_links}')
+            advisory_cell = f'<td class="cve-list">{"<br>".join(adv_parts)}</td>'
+
+            # Details cell: fixed-in-stable-releases table + description.
+            details_cell = f'<td>{rel_table}<div class="cve-list">{e(desc)}</div></td>'
+
+            rows.append(f"""
+            <tr data-pkg="{e(f['package'].lower())}" data-sev="{sev_key}" data-dsa="{e(dsa_attr)}">
+              <td>{e(f['package'])}</td>
+              {sev_cell}
+              <td class="ver-our">{e(f['our_version'])}</td>
+              <td class="ver-fix">{e(f['fixed_version'])}</td>
+              {advisory_cell}
+              {details_cell}
+            </tr>""")
+
+        count = len(findings)
+        summary = f"{count} package(s) behind Debian security fixes." if count else "All packages up to date."
+
+        # Severity summary badges.
+        sev_counts = {}
+        for f in findings:
+            key = (f.get("severity") or "unknown").lower()
+            sev_counts[key] = sev_counts.get(key, 0) + 1
+        badges = "".join(
+            f'<span class="sev-badge {k}">{k.capitalize()}: {n}</span>'
+            for k, n in (("critical", sev_counts.get("critical", 0)),
+                         ("high", sev_counts.get("high", 0)),
+                         ("medium", sev_counts.get("medium", 0)),
+                         ("low", sev_counts.get("low", 0)),
+                         ("unknown", sev_counts.get("unknown", 0)))
+            if n
         )
-        desc = f["cves"][0]["description"] if f["cves"] else ""
-        desc = desc if len(desc) <= 240 else desc[:240] + "…"
+        badges_html = f'<div class="filters">{badges}</div>' if badges else ""
 
-        rel_rows = "".join(
-            f'<tr><td>{e(r["release"])}</td><td>{e(r["version"])}</td></tr>'
-            for r in f.get("stable_releases", [])
+        filters_html = ""
+        if count:
+            dsa_filter = '''
+        <select class="filter-dsa">
+          <option value="">All</option>
+          <option value="has">Has DSA</option>
+          <option value="none">No DSA</option>
+        </select>''' if show_dsa else ''
+            filters_html = f'''
+      <div class="filters">
+        <input type="text" class="filter-pkg" placeholder="Filter by package…">
+        <select class="filter-sev">
+          <option value="">All severities</option>
+          <option value="critical">Critical</option>
+          <option value="high">High</option>
+          <option value="medium">Medium</option>
+          <option value="low">Low</option>
+          <option value="unknown">Unknown</option>
+        </select>
+        {dsa_filter}
+      </div>'''
+
+        if count:
+            table_html = f"""
+  <table>
+    <thead>
+      <tr><th>Package</th><th>Severity</th><th>Our version</th><th>Fixed (Sid)</th><th>Advisory</th><th>Details</th></tr>
+    </thead>
+    <tbody>{''.join(rows)}</tbody>
+  </table>"""
+        else:
+            table_html = ""
+        title_html = f'<h2 class="panel-title">{e(label)}</h2>' if multi else ""
+        repo_html = (
+            f'<div class="meta">Repository: <a href="{e(repo_url)}" target="_blank">{e(repo_url)}</a></div>'
+            if multi else ""
         )
-        rel_table = (
-            f'<table class="inner"><tr><th>Release</th><th>Version</th></tr>{rel_rows}</table>'
+        return f"""
+<section class="panel" id="{e(panel_id(label))}">
+  {title_html}
+  {repo_html}
+  <div class="summary {"bad" if count else "ok"}">{e(summary)}</div>
+  {badges_html}
+  {filters_html}
+  {table_html}
+</section>"""
+
+    multi = len(reports) > 1
+    panels_html = "".join(render_panel(r, multi) for r in reports)
+    if multi:
+        tab_buttons = "".join(
+            f'<button type="button" role="tab" data-panel="{e(panel_id(r["label"]))}">'
+            f'{e(r["label"])} ({len(r["findings"])})</button>'
+            for r in reports
         )
-
-        sev = f.get("severity")
-        sev_key = sev.lower() if sev else "unknown"
-        sev_cls = f"sev-{sev_key}" if sev else ""
-        sev_cell = f'<td class="{sev_cls}">{e(sev) if sev else "—"}</td>'
-
-        dsa_ids = []
-        for c in f["cves"]:
-            d = (dsa_map or {}).get(c["id"])
-            if d and d not in dsa_ids:
-                dsa_ids.append(d)
-        dsa_attr = " ".join(dsa_ids)
-
-        # Advisory cell: date context + DSA lines (if any) above the CVE list.
-        date_str, date_src = finding_date_info(f)
-        adv_parts = []
-        if date_str:
-            label = "DSA date" if date_src == "dsa" else "CVE published"
-            adv_parts.append(f'{label}: {date_str}')
-        if show_dsa and dsa_ids:
-            for d in dsa_ids:
-                ann = (dsa_announce or {}).get(d)
-                label = f'<a href="{e(ann)}" target="_blank">{e(d)}</a>' if ann else e(d)
-                tracker = f'<a href="https://security-tracker.debian.org/tracker/{e(d)}" target="_blank">Tracker</a>'
-                adv_parts.append(f'{label} | {tracker}')
-        adv_parts.append(f'{len(f["cves"])} CVE: {cve_links}')
-        advisory_cell = f'<td class="cve-list">{"<br>".join(adv_parts)}</td>'
-
-        # Details cell: fixed-in-stable-releases table + description.
-        details_cell = f'<td>{rel_table}<div class="cve-list">{e(desc)}</div></td>'
-
-        rows.append(f"""
-        <tr data-pkg="{e(f['package'].lower())}" data-sev="{sev_key}" data-dsa="{e(dsa_attr)}">
-          <td>{e(f['package'])}</td>
-          {sev_cell}
-          <td class="ver-our">{e(f['our_version'])}</td>
-          <td class="ver-fix">{e(f['fixed_version'])}</td>
-          {advisory_cell}
-          {details_cell}
-        </tr>""")
-
-    count = len(findings)
-    summary = f"{count} package(s) behind Debian security fixes." if count else "All packages up to date."
-
-    # Severity summary badges.
-    sev_counts = {}
-    for f in findings:
-        key = (f.get("severity") or "unknown").lower()
-        sev_counts[key] = sev_counts.get(key, 0) + 1
-    badges = "".join(
-        f'<span class="sev-badge {k}">{k.capitalize()}: {n}</span>'
-        for k, n in (("critical", sev_counts.get("critical", 0)),
-                     ("high", sev_counts.get("high", 0)),
-                     ("medium", sev_counts.get("medium", 0)),
-                     ("low", sev_counts.get("low", 0)),
-                     ("unknown", sev_counts.get("unknown", 0)))
-        if n
-    )
-    badges_html = f'<div class="filters">{badges}</div>' if badges else ""
-
-    filters_html = ""
-    if count:
-        dsa_filter = '''
-    <select id="filter-dsa">
-      <option value="">All</option>
-      <option value="has">Has DSA</option>
-      <option value="none">No DSA</option>
-    </select>''' if show_dsa else ''
-        filters_html = f'''
-  <div class="filters">
-    <input type="text" id="filter-pkg" placeholder="Filter by package…">
-    <select id="filter-sev">
-      <option value="">All severities</option>
-      <option value="critical">Critical</option>
-      <option value="high">High</option>
-      <option value="medium">Medium</option>
-      <option value="low">Low</option>
-      <option value="unknown">Unknown</option>
-    </select>
-    {dsa_filter}
-  </div>'''
+        tabs_html = f'<div class="tabs" role="tablist">{tab_buttons}</div>'
+        repo_meta = ""
+    else:
+        tabs_html = ""
+        only = reports[0]["repo_url"]
+        repo_meta = (
+            f'Repository: <a href="{e(only)}" target="_blank">{e(only)}</a>\n'
+            f'    &nbsp;|&nbsp; '
+        )
 
     # Fetches that never came back, so the reader knows the table above may be
     # missing advisories or versions.
@@ -1055,27 +1154,19 @@ def write_html_report(findings, html_dir, repo_url, dsa_map=None, dsa_announce=N
 <main>
   <h1>BlankOn Linux Security Report</h1>
   <div class="meta">
-    Repository: <a href="{e(repo_url)}" target="_blank">{e(repo_url)}</a>
-    &nbsp;|&nbsp; Upstream: <a href="{e(TRACKER_URL)}" target="_blank">Tracker</a>
+    {repo_meta}Upstream: <a href="{e(TRACKER_URL)}" target="_blank">Tracker</a>
  &nbsp;|&nbsp; <a href="{e(DSA_URL)}" target="_blank">DSA</a>
     &nbsp;|&nbsp; Generated: {e(generated_at)}
   </div>
-  <div class="summary {"bad" if count else "ok"}">{e(summary)}</div>
-  {badges_html}
-  {filters_html}
-  {"" if not count else f'''
-  <table>
-    <thead>
-      <tr><th>Package</th><th>Severity</th><th>Our version</th><th>Fixed (Sid)</th><th>Advisory</th><th>Details</th></tr>
-    </thead>
-    <tbody>{''.join(rows)}</tbody>
-  </table>'''}
+  {tabs_html}
+  {panels_html}
   {failures_html}
   <footer>
     Source code: <a href="{e(SOURCE_URL)}" target="_blank">{e(SOURCE_URL)}</a>
   </footer>
 </main>
 {FILTER_SCRIPT}
+{TABS_SCRIPT}
 <script>{NAV_SCRIPT}</script>
 </body>
 </html>
@@ -1090,7 +1181,7 @@ def write_html_report(findings, html_dir, repo_url, dsa_map=None, dsa_announce=N
 # ── entry point ───────────────────────────────────────────────────────────────
 
 def main():
-    repo_url = None
+    repo_urls = []
     output = None
     html_dir = None
     no_cache = False
@@ -1100,7 +1191,7 @@ def main():
 
     for arg in sys.argv[1:]:
         if arg.startswith("--repo=") or arg.startswith("--repository="):
-            repo_url = arg.split("=", 1)[1]
+            repo_urls.append(arg.split("=", 1)[1])
         elif arg.startswith("--output="):
             output = arg.split("=", 1)[1]
         elif arg.startswith("--html="):
@@ -1114,12 +1205,11 @@ def main():
         elif arg.startswith("--min-severity="):
             min_severity = arg.split("=", 1)[1].lower()
 
-    if not repo_url:
+    if not repo_urls:
         print("Error: --repo=/url or --repository=/url is required", file=sys.stderr)
         sys.exit(1)
 
     tracker = load_tracker(no_cache=no_cache)
-    package_index = build_package_index(repo_url)
     if no_dsa:
         dsa_map = None
         dsa_announce = None
@@ -1128,40 +1218,56 @@ def main():
         dsa_map, dsa_dates = load_dsa_map(no_cache=no_cache)
         dsa_announce = load_dsa_announce(no_cache=no_cache)
 
-    print("Evaluating packages ...", file=sys.stderr)
-    findings = evaluate(package_index, tracker)
+    reports = []
+    labels = set()
+    for repo_url in repo_urls:
+        base = label = repo_label(repo_url)
+        n = 2
+        while label in labels:
+            label = f"{base}-{n}"
+            n += 1
+        labels.add(label)
 
-    if not no_nvd:
-        enrich_nvd(findings, no_cache=no_cache)
+        package_index = build_package_index(repo_url)
 
-    if min_severity:
-        min_rank = SEVERITY_RANK.get(min_severity)
-        if min_rank is None:
-            print(f"Error: invalid --min-severity '{min_severity}' (use critical/high/medium/low)", file=sys.stderr)
-            sys.exit(1)
-        findings = [
-            f for f in findings
-            if f.get("severity") and SEVERITY_RANK.get(f["severity"].lower(), 0) >= min_rank
-        ]
+        print("Evaluating packages ...", file=sys.stderr)
+        findings = evaluate(package_index, tracker)
+
+        if not no_nvd:
+            enrich_nvd(findings, no_cache=no_cache)
+
+        if min_severity:
+            min_rank = SEVERITY_RANK.get(min_severity)
+            if min_rank is None:
+                print(f"Error: invalid --min-severity '{min_severity}' (use critical/high/medium/low)", file=sys.stderr)
+                sys.exit(1)
+            findings = [
+                f for f in findings
+                if f.get("severity") and SEVERITY_RANK.get(f["severity"].lower(), 0) >= min_rank
+            ]
+
+        reports.append({"label": label, "repo_url": repo_url, "findings": findings})
 
     if output:
+        if len(reports) == 1:
+            data = reports[0]["findings"]
+        else:
+            data = {r["label"]: r["findings"] for r in reports}
         with open(output, "w") as f:
-            json.dump(findings, f, indent=2)
+            json.dump(data, f, indent=2)
         print(f"Findings written to {output}", file=sys.stderr)
 
-    if not findings:
-        print("No vulnerable packages found.", file=sys.stderr)
-        if html_dir:
-            write_html_report(findings, html_dir, repo_url, dsa_map=dsa_map, dsa_announce=dsa_announce, dsa_dates=dsa_dates, failures=FETCH_FAILURES)
-        report_fetch_failures()
-        sys.exit(0)
-
-    print(f"Found {len(findings)} package(s) behind Debian security fixes:\n", file=sys.stderr)
-    for f in findings:
-        print(f"  {f['package']}: {f['our_version']} -> {f['fixed_version']} ({len(f['cves'])} CVE)")
+    for r in reports:
+        prefix = f"[{r['label']}] " if len(reports) > 1 else ""
+        if not r["findings"]:
+            print(f"{prefix}No vulnerable packages found.", file=sys.stderr)
+            continue
+        print(f"{prefix}Found {len(r['findings'])} package(s) behind Debian security fixes:\n", file=sys.stderr)
+        for f in r["findings"]:
+            print(f"  {f['package']}: {f['our_version']} -> {f['fixed_version']} ({len(f['cves'])} CVE)")
 
     if html_dir:
-        write_html_report(findings, html_dir, repo_url, dsa_map=dsa_map, dsa_announce=dsa_announce, dsa_dates=dsa_dates, failures=FETCH_FAILURES)
+        write_html_report(reports, html_dir, dsa_map=dsa_map, dsa_announce=dsa_announce, dsa_dates=dsa_dates, failures=FETCH_FAILURES)
 
     report_fetch_failures()
 
