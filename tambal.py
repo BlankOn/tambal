@@ -300,7 +300,9 @@ def discover_dists(repo_url):
     url = repo_url.rstrip("/") + "/dists/"
     html = fetch_text(url)
     names = re.findall(r'href="([^"/][^"]*/)"', html)
-    return [n.rstrip("/") for n in names]
+    # The public archive listing carries an `href="../"` parent link. It is
+    # not a distribution and must not become a failed fetch.
+    return [n.rstrip("/") for n in names if n.rstrip("/") not in (".", "..")]
 
 
 def fetch_release(repo_url, dist):
@@ -368,6 +370,324 @@ def build_package_index(repo_url):
 
     print(f"  Indexed {len(index)} source packages.", file=sys.stderr)
     return index
+
+
+# ── image package manifests ───────────────────────────────────────────────────
+
+def _parse_stanzas(text):
+    """Yield deb822-style stanzas as dicts, joining folded continuation lines."""
+    for block in text.split("\n\n"):
+        if not block.strip():
+            continue
+        fields = {}
+        key = None
+        for line in block.splitlines():
+            if not line:
+                continue
+            if line.startswith((" ", "\t")):
+                if key:
+                    fields[key] = (fields[key] + " " + line.strip()).strip()
+                continue
+            if ":" in line:
+                key, value = line.split(":", 1)
+                key = key.strip()
+                fields.setdefault(key, value.strip())
+        if fields:
+            yield fields
+
+
+def _parse_source_field(value, fallback):
+    """Split a Packages `Source:` field into (name, version-or-None)."""
+    m = re.match(r"^(\S+)(?:\s+\((.+)\))?$", value.strip())
+    if not m:
+        return fallback, None
+    return m.group(1), m.group(2)
+
+
+def fetch_sources_detail(repo_url, dist, component):
+    """Fetch Sources.gz and return (source versions, binary -> source map)."""
+    url = f"{repo_url.rstrip('/')}/dists/{dist}/{component}/source/Sources.gz"
+    try:
+        text = gzip.decompress(fetch_bytes(url)).decode("utf-8")
+    except Exception:
+        return {}, {}
+    versions = {}
+    binaries = {}
+    for fields in _parse_stanzas(text):
+        pkg = fields.get("Package")
+        ver = fields.get("Version")
+        if not pkg or not ver:
+            continue
+        if pkg not in versions or version_lt(versions[pkg], ver):
+            versions[pkg] = ver
+        for binary in fields.get("Binary", "").split(","):
+            binary = binary.strip()
+            if binary:
+                binaries.setdefault(binary, pkg)
+    return versions, binaries
+
+
+def fetch_packages_detail(repo_url, dist, component):
+    """Fetch Packages.gz and return binary -> {source, source_version, version}."""
+    url = f"{repo_url.rstrip('/')}/dists/{dist}/{component}/binary-amd64/Packages.gz"
+    try:
+        text = gzip.decompress(fetch_bytes(url)).decode("utf-8")
+    except Exception:
+        return {}
+    packages = {}
+    for fields in _parse_stanzas(text):
+        pkg = fields.get("Package")
+        ver = fields.get("Version")
+        if not pkg or not ver:
+            continue
+        source, source_version = _parse_source_field(fields.get("Source", pkg), pkg)
+        existing = packages.get(pkg)
+        if existing is None or version_lt(existing["version"], ver):
+            packages[pkg] = {
+                "source": source,
+                "source_version": source_version,
+                "version": ver,
+            }
+    return packages
+
+
+def build_archive_indexes(repo_url):
+    """Build both source and binary indexes from one walk over the archive.
+
+    The source index is what `tambal` already used. The binary index is needed
+    to translate an image manifest (binary package names) into Debian source
+    package names, which is the unit the security tracker uses.
+    """
+    print(f"Discovering dists at {repo_url} ...", file=sys.stderr)
+    dists = discover_dists(repo_url)
+    if not dists:
+        print("Error: no dists found.", file=sys.stderr)
+        sys.exit(1)
+    print(f"  Found dists: {', '.join(dists)}", file=sys.stderr)
+
+    source_index = {}
+    binary_from_sources = {}
+    binary_index = {}
+    for dist in dists:
+        _, components = fetch_release(repo_url, dist)
+        for component in components:
+            print(f"  Fetching {dist}/{component}/source/Sources.gz ...", file=sys.stderr)
+            sources, binaries = fetch_sources_detail(repo_url, dist, component)
+            for pkg, ver in sources.items():
+                existing = source_index.get(pkg)
+                if existing is None or version_lt(existing, ver):
+                    source_index[pkg] = ver
+            for binary, source in binaries.items():
+                binary_from_sources.setdefault(binary, source)
+
+            print(f"  Fetching {dist}/{component}/binary-amd64/Packages.gz ...", file=sys.stderr)
+            for binary, meta in fetch_packages_detail(repo_url, dist, component).items():
+                existing = binary_index.get(binary)
+                if existing is None or version_lt(existing["version"], meta["version"]):
+                    binary_index[binary] = meta
+
+    # Sources knows about binaries that have already been superseded in the
+    # current archive (old kernels, renamed binaries); use it as a fallback.
+    for binary, source in binary_from_sources.items():
+        if binary not in binary_index:
+            binary_index[binary] = {
+                "source": source,
+                "source_version": None,
+                "version": None,
+            }
+
+    print(f"  Indexed {len(source_index)} source and {len(binary_index)} binary packages.",
+          file=sys.stderr)
+    return source_index, binary_index
+
+
+def load_image_manifest(source):
+    """Read a `.packages` manifest from a local path or an http(s) URL.
+
+    The format published next to each ISO is one binary package per line:
+    `name<TAB>version`, with an optional `:arch` suffix on the name.
+    """
+    if source.startswith(("http://", "https://")):
+        text = fetch_text(source)
+    else:
+        with open(source, "r", encoding="utf-8") as f:
+            text = f.read()
+
+    manifest = {}
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        parts = line.split()
+        if len(parts) < 2:
+            continue
+        name = parts[0].split(":", 1)[0]
+        manifest[name] = parts[1]
+    return manifest
+
+
+def _strip_bin_nmu(version):
+    """Drop a binary-only upload suffix such as `+b2` or `+b12`."""
+    return re.sub(r"\+b\d+$", "", version)
+
+
+def _normalise_linux_version(source, image_version, archive_version):
+    """Neutralise the `7.8.0+7.1.13-1` kernel version trap.
+
+    Some kernel binaries carry a prefix before `+` that is not part of the
+    source version. Used naively it sorts above the archive and makes the
+    kernel look newer than it is. When the suffix is a valid version at or
+    below the archive version, use the suffix.
+    """
+    if source != "linux" or not archive_version or "+" not in image_version:
+        return image_version
+    if not version_lt(archive_version, image_version):
+        return image_version
+    prefix, suffix = image_version.split("+", 1)
+    if prefix and suffix and not version_lt(archive_version, suffix):
+        return suffix
+    return image_version
+
+
+def build_image_source_index(manifest, binary_index, source_index):
+    """Translate a binary package manifest into source package versions."""
+    image_index = {}
+    unmapped = []
+    for binary, binary_version in manifest.items():
+        meta = binary_index.get(binary)
+        if meta:
+            source = meta["source"]
+            # If the image ships exactly the binary build currently in the
+            # archive, trust the archive's source version (it handles packages
+            # whose binary and source versions differ, e.g. signed kernels).
+            if meta.get("source_version") and meta.get("version") == binary_version:
+                source_version = meta["source_version"]
+            else:
+                source_version = _strip_bin_nmu(binary_version)
+        elif binary in source_index:
+            source = binary
+            source_version = _strip_bin_nmu(binary_version)
+        else:
+            # The image ships something the archive does not know about (for
+            # example a third-party package). Keep it as its own source name so
+            # the finding can still be reported as `needs_sync` with a null
+            # archive version instead of being silently dropped.
+            source = binary
+            source_version = _strip_bin_nmu(binary_version)
+            unmapped.append(binary)
+
+        source_version = _normalise_linux_version(
+            source, source_version, source_index.get(source))
+        existing = image_index.get(source)
+        if existing is None or version_lt(existing, source_version):
+            image_index[source] = source_version
+    return image_index, unmapped
+
+
+STATE_LABELS = {
+    "fixable_now": "Upgrade available",
+    "needs_sync": "Archive update needed",
+    "no_fix": "No fix yet",
+}
+
+
+def _cve_entry(cve, info, fixed_version=None):
+    return {
+        "id": cve,
+        "fixed_version": fixed_version,
+        "description": info.get("description", ""),
+        "severity": extract_severity(info),
+    }
+
+
+def build_image_findings(image_index, archive_index, tracker):
+    """Evaluate the packages shipped in an image, not the whole archive.
+
+    `fixable_now` requires the archive to already contain the exact sid fix we
+    are comparing against. Merely being newer than the image is not enough:
+    an archive version that is still below the sid fix cannot resolve the
+    vulnerability (this is the kernel case).
+    """
+    findings = []
+    for pkg, image_version in image_index.items():
+        cves = tracker.get(pkg)
+        if not cves:
+            continue
+
+        fixed_map = {}
+        open_cves = []
+        for cve, info in cves.items():
+            if not isinstance(info, dict):
+                continue
+            sid = info.get("releases", {}).get("sid", {})
+            status = sid.get("status")
+            if status == "resolved":
+                fixed_version = sid.get("fixed_version")
+                if fixed_version and fixed_version != "0" and version_lt(image_version, fixed_version):
+                    fixed_map.setdefault(fixed_version, []).append(cve)
+            elif status in ("open", "undetermined"):
+                open_cves.append(cve)
+
+        if not fixed_map and not open_cves:
+            continue
+
+        if fixed_map:
+            target = max_version(fixed_map.keys())
+            archive_version = archive_index.get(pkg)
+            if archive_version is not None and not version_lt(archive_version, target):
+                state = "fixable_now"
+            else:
+                state = "needs_sync"
+
+            cve_list = []
+            for fixed_version, ids in fixed_map.items():
+                for cve in ids:
+                    cve_list.append(_cve_entry(cve, cves[cve], fixed_version))
+            cve_list.sort(key=lambda c: c["fixed_version"], reverse=True)
+            cve_list = cve_list[:100]
+        else:
+            # No upstream fix at all (or only an unfixed sid status).
+            target = None
+            archive_version = archive_index.get(pkg)
+            state = "no_fix"
+            cve_list = [_cve_entry(cve, cves[cve]) for cve in open_cves]
+            cve_list.sort(key=lambda c: c["id"])
+            cve_list = cve_list[:100]
+
+        sev = max_severity([c["severity"] for c in cve_list])
+
+        release_map = {}
+        for cve in cve_list:
+            if not cve["fixed_version"]:
+                continue
+            for rel, relinfo in cves[cve["id"]].get("releases", {}).items():
+                if relinfo.get("status") != "resolved":
+                    continue
+                rfv = relinfo.get("fixed_version")
+                if not rfv or rfv == "0":
+                    continue
+                if rel not in release_map or version_lt(release_map[rel], rfv):
+                    release_map[rel] = rfv
+        stable_releases = [
+            {"release": r, "version": release_map[r]}
+            for r in sorted(release_map)
+        ]
+
+        findings.append({
+            "package": pkg,
+            "severity": sev,
+            "our_version": archive_version,
+            "fixed_version": target,
+            "image_version": image_version,
+            "archive_version": archive_version,
+            "state": state,
+            "stable_releases": stable_releases,
+            "cves": cve_list,
+        })
+
+    state_order = {"fixable_now": 0, "needs_sync": 1, "no_fix": 2}
+    findings.sort(key=lambda f: (state_order.get(f["state"], 9), f["package"]))
+    return findings
 
 
 # ── tracker data ──────────────────────────────────────────────────────────────
@@ -723,6 +1043,14 @@ PAGE_STYLE = """
     .sev-badge.medium { color: #b8860b; border-color: #b8860b; }
     .sev-badge.low { color: var(--muted); }
     .sev-badge.unknown { color: var(--muted); }
+    .state-badge { display: inline-block; padding: 0.12rem 0.55rem; border-radius: 999px;
+      font-size: 0.8rem; margin: 0 0.3rem 0.3rem 0; border: 1px solid var(--border); white-space: nowrap; }
+    .state-badge.fixable_now { color: var(--ok); border-color: var(--ok); }
+    .state-badge.needs_sync { color: #b8860b; border-color: #b8860b; }
+    .state-badge.no_fix { color: var(--bad); border-color: var(--bad); }
+    .state-fixable_now { color: var(--ok); font-weight: bold; }
+    .state-needs_sync { color: #b8860b; font-weight: bold; }
+    .state-no_fix { color: var(--bad); font-weight: bold; }
     footer {
       margin-top: 2.5rem; padding-top: 1rem;
       border-top: 1px solid var(--border);
@@ -850,26 +1178,31 @@ FILTER_SCRIPT = """<script>
   var input = document.getElementById('filter-pkg');
   var sel = document.getElementById('filter-sev');
   var dsaSel = document.getElementById('filter-dsa');
+  var stateSel = document.getElementById('filter-state');
   if (!input || !sel) return;
   function apply() {
     var q = input.value.toLowerCase().trim();
     var sev = sel.value;
     var dsaV = dsaSel ? dsaSel.value : '';
+    var stateV = stateSel ? stateSel.value : '';
     document.querySelectorAll('tbody tr[data-pkg]').forEach(function (tr) {
       var pkg = tr.getAttribute('data-pkg') || '';
       var s = tr.getAttribute('data-sev') || '';
       var d = tr.getAttribute('data-dsa') || '';
+      var st = tr.getAttribute('data-state') || '';
       var okP = !q || pkg.indexOf(q) !== -1;
       var okS = !sev || s === sev;
       var okD = true;
       if (dsaV === 'has') okD = d.trim() !== '';
       else if (dsaV === 'none') okD = d.trim() === '';
-      tr.style.display = (okP && okS && okD) ? '' : 'none';
+      var okSt = !stateV || st === stateV;
+      tr.style.display = (okP && okS && okD && okSt) ? '' : 'none';
     });
   }
   input.addEventListener('input', apply);
   sel.addEventListener('change', apply);
   if (dsaSel) dsaSel.addEventListener('change', apply);
+  if (stateSel) stateSel.addEventListener('change', apply);
 })();
 </script>
 """
@@ -898,6 +1231,7 @@ def write_html_report(findings, html_dir, repo_url, dsa_map=None, dsa_announce=N
         return None, None
 
     show_dsa = dsa_map is not None
+    image_mode = any("image_version" in f for f in findings)
     generated_at = datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S %Z")
 
     rows = []
@@ -921,6 +1255,26 @@ def write_html_report(findings, html_dir, repo_url, dsa_map=None, dsa_announce=N
         sev_key = sev.lower() if sev else "unknown"
         sev_cls = f"sev-{sev_key}" if sev else ""
         sev_cell = f'<td class="{sev_cls}">{e(sev) if sev else "—"}</td>'
+
+        state = f.get("state")
+        state_cell = ""
+        state_attr = ""
+        if image_mode:
+            state_attr = f' data-state="{e(state)}"'
+            label = STATE_LABELS.get(state, state or "—")
+            state_cell = f'<td class="state-{e(state)}">{e(label)}</td>'
+
+        fixed_version = f.get("fixed_version")
+        fixed_cell = f'<td class="ver-fix">{e(fixed_version)}</td>' if fixed_version else '<td>—</td>'
+        if image_mode:
+            image_version = f.get("image_version") or "—"
+            archive_version = f.get("archive_version") or "—"
+            version_cells = (
+                f'<td class="ver-our">{e(image_version)}</td>'
+                f'<td>{e(archive_version)}</td>'
+            )
+        else:
+            version_cells = f'<td class="ver-our">{e(f.get("our_version") or "—")}</td>'
 
         dsa_ids = []
         for c in f["cves"]:
@@ -948,17 +1302,36 @@ def write_html_report(findings, html_dir, repo_url, dsa_map=None, dsa_announce=N
         details_cell = f'<td>{rel_table}<div class="cve-list">{e(desc)}</div></td>'
 
         rows.append(f"""
-        <tr data-pkg="{e(f['package'].lower())}" data-sev="{sev_key}" data-dsa="{e(dsa_attr)}">
+        <tr data-pkg="{e(f['package'].lower())}" data-sev="{sev_key}" data-dsa="{e(dsa_attr)}"{state_attr}>
           <td>{e(f['package'])}</td>
+          {state_cell}
           {sev_cell}
-          <td class="ver-our">{e(f['our_version'])}</td>
-          <td class="ver-fix">{e(f['fixed_version'])}</td>
+          {version_cells}
+          {fixed_cell}
           {advisory_cell}
           {details_cell}
         </tr>""")
 
     count = len(findings)
-    summary = f"{count} package(s) behind Debian security fixes." if count else "All packages up to date."
+    if image_mode:
+        summary = (f"{count} source package(s) shipped in this image have security findings."
+                   if count else "No security findings in the packages shipped in this image.")
+    else:
+        summary = (f"{count} source package(s) in the archive are behind Debian sid."
+                   if count else "All source packages are up to date with Debian sid.")
+
+    # State summary badges (image mode only).
+    state_counts = {}
+    for f in findings:
+        key = f.get("state") or "unknown"
+        state_counts[key] = state_counts.get(key, 0) + 1
+    state_badges = "".join(
+        f'<span class="state-badge {k}">{STATE_LABELS.get(k, k)}: {n}</span>'
+        for k, n in (("fixable_now", state_counts.get("fixable_now", 0)),
+                     ("needs_sync", state_counts.get("needs_sync", 0)),
+                     ("no_fix", state_counts.get("no_fix", 0)))
+        if n
+    ) if image_mode else ""
 
     # Severity summary badges.
     sev_counts = {}
@@ -974,7 +1347,7 @@ def write_html_report(findings, html_dir, repo_url, dsa_map=None, dsa_announce=N
                      ("unknown", sev_counts.get("unknown", 0)))
         if n
     )
-    badges_html = f'<div class="filters">{badges}</div>' if badges else ""
+    badges_html = f'<div class="filters">{state_badges}{badges}</div>' if (badges or state_badges) else ""
 
     filters_html = ""
     if count:
@@ -984,6 +1357,13 @@ def write_html_report(findings, html_dir, repo_url, dsa_map=None, dsa_announce=N
       <option value="has">Has DSA</option>
       <option value="none">No DSA</option>
     </select>''' if show_dsa else ''
+        state_filter = '''
+    <select id="filter-state">
+      <option value="">All statuses</option>
+      <option value="fixable_now">Upgrade available</option>
+      <option value="needs_sync">Archive update needed</option>
+      <option value="no_fix">No fix yet</option>
+    </select>''' if image_mode else ''
         filters_html = f'''
   <div class="filters">
     <input type="text" id="filter-pkg" placeholder="Filter by package…">
@@ -995,6 +1375,7 @@ def write_html_report(findings, html_dir, repo_url, dsa_map=None, dsa_announce=N
       <option value="low">Low</option>
       <option value="unknown">Unknown</option>
     </select>
+    {state_filter}
     {dsa_filter}
   </div>'''
 
@@ -1041,6 +1422,14 @@ def write_html_report(findings, html_dir, repo_url, dsa_map=None, dsa_announce=N
     else:
         failures_html = ""
 
+    if image_mode:
+        table_header = ("<th>Package</th><th>Status</th><th>Severity</th>"
+                        "<th>Image version</th><th>Archive version</th>"
+                        "<th>Debian sid fix</th><th>Advisory</th><th>Details</th>")
+    else:
+        table_header = ("<th>Package</th><th>Severity</th><th>Archive version</th>"
+                        "<th>Debian sid fix</th><th>Advisory</th><th>Details</th>")
+
     page = f"""<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -1066,7 +1455,7 @@ def write_html_report(findings, html_dir, repo_url, dsa_map=None, dsa_announce=N
   {"" if not count else f'''
   <table>
     <thead>
-      <tr><th>Package</th><th>Severity</th><th>Our version</th><th>Fixed (Sid)</th><th>Advisory</th><th>Details</th></tr>
+      <tr>{table_header}</tr>
     </thead>
     <tbody>{''.join(rows)}</tbody>
   </table>'''}
@@ -1093,6 +1482,7 @@ def main():
     repo_url = None
     output = None
     html_dir = None
+    image_packages = None
     no_cache = False
     no_nvd = False
     no_dsa = False
@@ -1101,6 +1491,12 @@ def main():
     for arg in sys.argv[1:]:
         if arg.startswith("--repo=") or arg.startswith("--repository="):
             repo_url = arg.split("=", 1)[1]
+        elif arg.startswith("--image-packages="):
+            if image_packages:
+                print("Error: --image-packages can only be given once in this proof of concept.",
+                      file=sys.stderr)
+                sys.exit(1)
+            image_packages = arg.split("=", 1)[1]
         elif arg.startswith("--output="):
             output = arg.split("=", 1)[1]
         elif arg.startswith("--html="):
@@ -1119,7 +1515,33 @@ def main():
         sys.exit(1)
 
     tracker = load_tracker(no_cache=no_cache)
-    package_index = build_package_index(repo_url)
+
+    if image_packages:
+        archive_index, binary_index = build_archive_indexes(repo_url)
+        manifest = load_image_manifest(image_packages)
+        print(f"Loaded {len(manifest)} binary packages from {image_packages}", file=sys.stderr)
+        image_index, unmapped = build_image_source_index(
+            manifest, binary_index, archive_index)
+        print(f"  Mapped them to {len(image_index)} source packages "
+              f"({len(unmapped)} binary package(s) had no source mapping).", file=sys.stderr)
+        if unmapped:
+            print(f"  Unmapped: {', '.join(sorted(unmapped)[:10])}"
+                  f"{' …' if len(unmapped) > 10 else ''}", file=sys.stderr)
+
+        print("Evaluating image packages ...", file=sys.stderr)
+        findings = build_image_findings(image_index, archive_index, tracker)
+
+        counts = {state: 0 for state in STATE_LABELS}
+        for f in findings:
+            counts[f["state"]] = counts.get(f["state"], 0) + 1
+        print(f"{counts['fixable_now']} fixable_now / "
+              f"{counts['needs_sync']} needs_sync / "
+              f"{counts['no_fix']} no_fix", file=sys.stderr)
+    else:
+        package_index = build_package_index(repo_url)
+        print("Evaluating packages ...", file=sys.stderr)
+        findings = evaluate(package_index, tracker)
+
     if no_dsa:
         dsa_map = None
         dsa_announce = None
@@ -1127,9 +1549,6 @@ def main():
     else:
         dsa_map, dsa_dates = load_dsa_map(no_cache=no_cache)
         dsa_announce = load_dsa_announce(no_cache=no_cache)
-
-    print("Evaluating packages ...", file=sys.stderr)
-    findings = evaluate(package_index, tracker)
 
     if not no_nvd:
         enrich_nvd(findings, no_cache=no_cache)
@@ -1156,9 +1575,18 @@ def main():
         report_fetch_failures()
         sys.exit(0)
 
-    print(f"Found {len(findings)} package(s) behind Debian security fixes:\n", file=sys.stderr)
-    for f in findings:
-        print(f"  {f['package']}: {f['our_version']} -> {f['fixed_version']} ({len(f['cves'])} CVE)")
+    if image_packages:
+        print(f"Found {len(findings)} source package(s) with security findings in the image:\n",
+              file=sys.stderr)
+        for f in findings:
+            print(f"  {f['package']} [{f['state']}]: image {f['image_version']} "
+                  f"-> archive {f['archive_version'] or '—'} "
+                  f"(fix {f['fixed_version'] or '—'}, {len(f['cves'])} CVE)")
+    else:
+        print(f"Found {len(findings)} source package(s) in the archive behind Debian sid:\n",
+              file=sys.stderr)
+        for f in findings:
+            print(f"  {f['package']}: {f['our_version']} -> {f['fixed_version']} ({len(f['cves'])} CVE)")
 
     if html_dir:
         write_html_report(findings, html_dir, repo_url, dsa_map=dsa_map, dsa_announce=dsa_announce, dsa_dates=dsa_dates, failures=FETCH_FAILURES)
